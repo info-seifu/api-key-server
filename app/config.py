@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from functools import lru_cache
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, BaseSettings, Field, validator
+
+from .secrets import load_secret_as_dict, should_use_secret_manager
+
+logger = logging.getLogger("api-key-server.config")
 
 
 class RateLimitConfig(BaseModel):
@@ -33,20 +39,53 @@ class Settings(BaseSettings):
 
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
+    # Secret Manager configuration
+    gcp_project_id: Optional[str] = None
+    secret_product_keys_name: str = "openai-api-keys"
+    secret_jwt_keys_name: str = "jwt-public-keys"
+    secret_hmac_secrets_name: str = "hmac-secrets"
+
     class Config:
         env_prefix = "API_KEY_SERVER_"
         env_file = ".env"
 
     @validator("product_keys", pre=True)
     def _parse_json_dict(cls, value: object) -> Dict[str, str]:
+        if should_use_secret_manager() and not value:
+            logger.info("Loading product_keys from Secret Manager")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get("API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME", "openai-api-keys")
+            try:
+                return load_secret_as_dict(secret_name, project_id)
+            except Exception as e:
+                logger.error(f"Failed to load product_keys from Secret Manager: {e}")
+                raise
         return cls._parse_dict_field(value)
 
     @validator("jwt_public_keys", pre=True)
     def _parse_jwt_keys(cls, value: object) -> Dict[str, str]:
+        if should_use_secret_manager() and not value:
+            logger.info("Loading jwt_public_keys from Secret Manager")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get("API_KEY_SERVER_SECRET_JWT_KEYS_NAME", "jwt-public-keys")
+            try:
+                return load_secret_as_dict(secret_name, project_id)
+            except Exception as e:
+                logger.warning(f"Failed to load jwt_public_keys from Secret Manager: {e}")
+                return {}
         return cls._parse_dict_field(value)
 
     @validator("client_hmac_secrets", pre=True)
     def _parse_hmac_secrets(cls, value: object) -> Dict[str, str]:
+        if should_use_secret_manager() and not value:
+            logger.info("Loading client_hmac_secrets from Secret Manager")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get("API_KEY_SERVER_SECRET_HMAC_SECRETS_NAME", "hmac-secrets")
+            try:
+                return load_secret_as_dict(secret_name, project_id)
+            except Exception as e:
+                logger.warning(f"Failed to load client_hmac_secrets from Secret Manager: {e}")
+                return {}
         return cls._parse_dict_field(value)
 
     @staticmethod

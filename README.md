@@ -13,6 +13,8 @@ A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on th
 ## Configuration
 All settings are loaded from environment variables with the prefix `API_KEY_SERVER_`.
 
+### Basic Configuration
+
 | Variable | Description | Example |
 | --- | --- | --- |
 | `API_KEY_SERVER_PRODUCT_KEYS` | JSON map of product IDs to upstream API keys. | `{ "product-a": "sk-..." }` |
@@ -24,6 +26,24 @@ All settings are loaded from environment variables with the prefix `API_KEY_SERV
 | `API_KEY_SERVER_REDIS_URL` | Redis URL for rate limiting (optional). | `redis://:pass@host:6379/0` |
 | `API_KEY_SERVER_REDIS_PREFIX` | Prefix for Redis keys. | `api-key-server` |
 | `API_KEY_SERVER_HMAC_CLOCK_TOLERANCE_SECONDS` | Allowed clock skew for timestamped HMAC. | `300` |
+
+### Secret Manager Integration (Recommended for Production)
+
+For production deployments, it's recommended to use Google Cloud Secret Manager to store sensitive data instead of passing secrets as environment variables.
+
+| Variable | Description | Example |
+| --- | --- | --- |
+| `USE_SECRET_MANAGER` | Enable Secret Manager integration. Set to `true`, `1`, or `yes`. | `true` |
+| `GCP_PROJECT` or `GOOGLE_CLOUD_PROJECT` | GCP project ID for Secret Manager. | `my-project-123` |
+| `API_KEY_SERVER_GCP_PROJECT_ID` | Alternative way to specify GCP project ID. | `my-project-123` |
+| `API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME` | Secret name for product keys. | `openai-api-keys` (default) |
+| `API_KEY_SERVER_SECRET_JWT_KEYS_NAME` | Secret name for JWT public keys. | `jwt-public-keys` (default) |
+| `API_KEY_SERVER_SECRET_HMAC_SECRETS_NAME` | Secret name for HMAC secrets. | `hmac-secrets` (default) |
+
+**How it works:**
+- When `USE_SECRET_MANAGER=true`, the server automatically loads secrets from Secret Manager at startup
+- If environment variables (`API_KEY_SERVER_PRODUCT_KEYS`, etc.) are not set, it fetches from Secret Manager
+- Environment variables take precedence over Secret Manager (useful for local development)
 
 Rate limit defaults (per product/user):
 - Bucket capacity: 10 requests
@@ -38,7 +58,88 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8080
 ```
 
-## Deploy to Cloud Run (example)
+## Deploy to Cloud Run
+
+### Option 1: Using Secret Manager (Recommended)
+
+**Step 1: Create secrets in Secret Manager**
+```bash
+# Create product keys secret
+cat > product-keys.json <<EOF
+{
+  "product-a": "sk-xxxxxxxxxxxxx",
+  "product-b": "sk-yyyyyyyyyyy"
+}
+EOF
+
+gcloud secrets create openai-api-keys \
+  --data-file=product-keys.json \
+  --replication-policy=automatic
+
+# Create JWT public keys secret
+cat > jwt-keys.json <<EOF
+{
+  "kid-1": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhki...\n-----END PUBLIC KEY-----"
+}
+EOF
+
+gcloud secrets create jwt-public-keys \
+  --data-file=jwt-keys.json \
+  --replication-policy=automatic
+
+# Create HMAC secrets
+cat > hmac-secrets.json <<EOF
+{
+  "desktop": "shared-secret-123",
+  "mobile": "shared-secret-456"
+}
+EOF
+
+gcloud secrets create hmac-secrets \
+  --data-file=hmac-secrets.json \
+  --replication-policy=automatic
+
+# Clean up local files
+rm product-keys.json jwt-keys.json hmac-secrets.json
+```
+
+**Step 2: Grant Secret Manager access to Cloud Run service account**
+```bash
+# Get the Cloud Run service account email (after first deploy, or use default compute SA)
+PROJECT_ID=$(gcloud config get-value project)
+SERVICE_ACCOUNT="${PROJECT_ID}-compute@developer.gserviceaccount.com"
+
+# Grant Secret Manager Secret Accessor role
+gcloud secrets add-iam-policy-binding openai-api-keys \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding jwt-public-keys \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding hmac-secrets \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+**Step 3: Build and deploy to Cloud Run**
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+
+# Build image
+gcloud builds submit --tag gcr.io/${PROJECT_ID}/api-key-server
+
+# Deploy with Secret Manager integration
+gcloud run deploy api-key-server \
+  --image gcr.io/${PROJECT_ID}/api-key-server \
+  --region asia-northeast1 \
+  --set-env-vars "USE_SECRET_MANAGER=true" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" \
+  --allow-unauthenticated=false
+```
+
+### Option 2: Using Environment Variables (Not Recommended for Production)
 ```bash
 gcloud builds submit --tag gcr.io/PROJECT_ID/api-key-server
 gcloud run deploy api-key-server \
@@ -50,6 +151,32 @@ gcloud run deploy api-key-server \
 ```
 
 ### GitHub からの自動デプロイを設定する場合の例 (Cloud Build トリガー)
+
+#### Option 1: Using Secret Manager (Recommended)
+1. GCP プロジェクトで Cloud Build と Secret Manager を有効化し、GitHub 連携を設定する。
+2. 上記の手順でSecret Managerにシークレットを作成する。
+3. Cloud Build トリガーを作成し、`main` ブランチへの push をトリガー条件にする。
+4. トリガーのビルドステップ例 (`cloudbuild.yaml`):
+   ```yaml
+   steps:
+     - name: 'gcr.io/cloud-builders/gcloud'
+       args: ['builds', 'submit', '--tag', 'gcr.io/$PROJECT_ID/api-key-server']
+     - name: 'gcr.io/cloud-builders/gcloud'
+       args:
+         - 'run'
+         - 'deploy'
+         - 'api-key-server'
+         - '--image'
+         - 'gcr.io/$PROJECT_ID/api-key-server'
+         - '--region'
+         - 'asia-northeast1'
+         - '--set-env-vars'
+         - 'USE_SECRET_MANAGER=true,GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
+         - '--allow-unauthenticated=false'
+   ```
+5. Cloud Runのサービスアカウントに Secret Manager Secret Accessor 権限が付与されていることを確認する。
+
+#### Option 2: Using Environment Variables (Not Recommended)
 1. GCP プロジェクトで Cloud Build を有効化し、GitHub 連携を設定する。
 2. Cloud Build トリガーを作成し、`main` ブランチへの push をトリガー条件にする。
 3. トリガーのビルドステップ例:

@@ -84,9 +84,45 @@
 - リクエストサイズ/回数の制限、ストリーミング時間上限。
 
 ### 4.4 Secrets 管理
-- OpenAIキー等は **Secret Manager** に格納し、**参照権限のみ**を Cloud Run SA に付与。
-- **環境変数へプレーン展開しない**設計が理想（ランタイムで取得・キャッシュ）。
-- **ログ・例外**に機密を出さない（マスク設定必須）。
+
+#### 4.4.1 Secret Manager の使用（推奨）
+本プロキシは **Secret Manager 統合機能** を実装しており、以下の方法でシークレットを管理できます：
+
+**設定方法:**
+```bash
+# 1. Secret Manager にシークレットを作成
+gcloud secrets create openai-api-keys \
+  --data-file=product-keys.json \
+  --replication-policy=automatic
+
+# 2. Cloud Run サービスアカウントに権限を付与
+gcloud secrets add-iam-policy-binding openai-api-keys \
+  --member="serviceAccount:run-proxy-sa@<project>.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# 3. Cloud Run デプロイ時に環境変数を設定
+gcloud run deploy api-key-server \
+  --set-env-vars "USE_SECRET_MANAGER=true" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=<project-id>"
+```
+
+**動作:**
+- `USE_SECRET_MANAGER=true` が設定されている場合、起動時に Secret Manager からシークレットを取得
+- 環境変数が未設定の場合のみ Secret Manager から読み込む（環境変数が優先）
+- デフォルトのシークレット名: `openai-api-keys`, `jwt-public-keys`, `hmac-secrets`
+- シークレット名は環境変数でカスタマイズ可能（`API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME` など）
+
+**メリット:**
+- OpenAIキー等は **Secret Manager** に格納し、**参照権限のみ**を Cloud Run SA に付与
+- **環境変数へプレーン展開しない**設計（ランタイムで取得・キャッシュ）
+- バージョン管理とローテーションが容易
+- 監査ログによるアクセス追跡が可能
+- **ログ・例外**に機密を出さない（マスク設定必須）
+
+**ベストプラクティス:**
+- 本番環境では必ず Secret Manager を使用
+- 開発環境では環境変数を使用（ローカルテスト用）
+- シークレットのバージョンは `latest` ではなく特定バージョンを指定することを検討
 
 ---
 
@@ -113,23 +149,104 @@
   - 付与: `Secret Manager Secret Accessor`, `Logging Writer`, `Monitoring Metric Writer`, `Redis Client` など最小権限。
 
 ### 6.2 Secret Manager
-- `OPENAI_KEY_PRODUCT_A`, `OPENAI_KEY_PRODUCT_B` … を Secret として登録。
-- カナリア: 新旧キーの二重運用→切替→旧キー失効。
+**シークレットの作成:**
+```bash
+# プロダクトキー（JSON形式）
+cat > product-keys.json <<EOF
+{
+  "product-a": "sk-xxxxxxxxxxxxx",
+  "product-b": "sk-yyyyyyyyyyy"
+}
+EOF
+
+gcloud secrets create openai-api-keys \
+  --data-file=product-keys.json \
+  --replication-policy=automatic
+
+# JWT公開鍵（JSON形式）
+cat > jwt-keys.json <<EOF
+{
+  "kid-1": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+}
+EOF
+
+gcloud secrets create jwt-public-keys \
+  --data-file=jwt-keys.json \
+  --replication-policy=automatic
+
+# HMAC共有鍵（JSON形式）
+gcloud secrets create hmac-secrets \
+  --data-file=hmac-secrets.json \
+  --replication-policy=automatic
+
+# ローカルファイルを削除
+rm product-keys.json jwt-keys.json hmac-secrets.json
+```
+
+**権限の付与:**
+```bash
+SERVICE_ACCOUNT="run-proxy-sa@<project>.iam.gserviceaccount.com"
+
+gcloud secrets add-iam-policy-binding openai-api-keys \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding jwt-public-keys \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding hmac-secrets \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+**キーローテーション（カナリア方式）:**
+```bash
+# 1. 新しいバージョンを追加
+gcloud secrets versions add openai-api-keys --data-file=new-keys.json
+
+# 2. アプリケーションを再起動して新バージョンを取得
+gcloud run services update api-key-server --region <region>
+
+# 3. 動作確認後、古いバージョンを無効化
+gcloud secrets versions disable 1 --secret=openai-api-keys
+```
 
 ### 6.3 Memorystore (Redis)
 - 低プランで開始。レプリカ/耐障害は必要に応じて。
 - VPC Connector 経由で Cloud Run から私設アクセス。
 
-### 6.4 Cloud Run デプロイ例（抜粋）
+### 6.4 Cloud Run デプロイ例
+
+#### 6.4.1 Secret Manager を使用する場合（推奨）
 ```bash
-gcloud run deploy chat-proxy \
-  --image gcr.io/<project>/chat-proxy:latest \
+PROJECT_ID="<your-project-id>"
+
+gcloud run deploy api-key-server \
+  --image gcr.io/${PROJECT_ID}/api-key-server:latest \
+  --region asia-northeast1 \
+  --platform managed \
+  --service-account run-proxy-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --memory 512Mi --cpu 1 \
+  --ingress internal-and-cloud-load-balancing \
+  --allow-unauthenticated=false \
+  --set-env-vars "USE_SECRET_MANAGER=true" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" \
+  --set-env-vars "API_KEY_SERVER_REDIS_URL=redis://:password@<redis-host>:6379/0" \
+  --vpc-connector <connector-name>
+```
+
+#### 6.4.2 環境変数を使用する場合（非推奨）
+```bash
+gcloud run deploy api-key-server \
+  --image gcr.io/<project>/api-key-server:latest \
   --region <region> \
   --platform managed \
   --service-account run-proxy-sa@<project>.iam.gserviceaccount.com \
   --memory 512Mi --cpu 1 \
   --ingress internal-and-cloud-load-balancing \
   --allow-unauthenticated=false \
+  --set-env-vars "API_KEY_SERVER_PRODUCT_KEYS={\"product-a\":\"sk-xxx\"}" \
   --set-env-vars REDIS_HOST=<host>,REDIS_PORT=<port> \
   --vpc-connector <connector-name>
 ```
