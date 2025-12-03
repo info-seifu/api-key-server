@@ -6,3 +6,8 @@ __pycache__/
 .cache/
 .idea/
 .vscode/
+
+# Secret Manager用の一時ファイル（機密情報を含む）
+product-keys.json
+jwt-keys.json
+hmac-secrets.json
