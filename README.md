@@ -11,6 +11,151 @@ A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on th
 - Simple `/healthz` endpoint for Cloud Run health checks.
 - Dockerfile tailored for Cloud Run and configurable via environment variables.
 
+---
+
+## For Client Developers（クライアント開発者向け）
+
+このプロキシサーバーを使用してAI APIにアクセスする方法を説明します。
+
+### エンドポイント
+
+```
+ベースURL: https://your-proxy-server.run.app
+チャット補完: POST /chat/{product_id}
+```
+
+### 利用可能なモデル
+
+| プロバイダー | モデル名 | 用途 |
+| --- | --- | --- |
+| OpenAI | `gpt-4o` | テキスト生成（高性能） |
+| OpenAI | `gpt-4o-mini` | テキスト生成（高速・低コスト） |
+| Google Gemini | `gemini-3-pro-preview-11-2025` | テキスト生成（最新） |
+| Google Gemini | `gemini-2.5-pro-preview-tts` | 音声生成（TTS） |
+| Google Gemini | `gemini-2.0-flash-exp` | テキスト生成（高速） |
+| Anthropic Claude | `claude-3-7-sonnet-20250219` | テキスト生成（推論特化） |
+
+### リクエスト形式（OpenAI互換）
+
+```json
+POST /chat/{product_id}
+Content-Type: application/json
+
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "user", "content": "こんにちは"}
+  ]
+}
+```
+
+### レスポンス形式（OpenAI互換）
+
+```json
+{
+  "id": "chatcmpl-xxxxx",
+  "object": "chat.completion",
+  "model": "gpt-4o",
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "こんにちは！何かお手伝いできることはありますか？"
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 20,
+    "total_tokens": 30
+  }
+}
+```
+
+### 認証
+
+**IAP経由でアクセスする場合（推奨）:**
+- Google Workspaceでログイン済みであれば、特別な認証ヘッダーは不要
+- IAPが自動的にJWTトークンを付与します
+
+**開発環境など直接アクセスする場合:**
+- JWT または HMAC 認証が必要（別途管理者に問い合わせ）
+
+### サンプルコード
+
+#### Python（requests）
+
+```python
+import requests
+
+response = requests.post(
+    "https://your-proxy-server.run.app/chat/product-a",
+    json={
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "こんにちは"}]
+    }
+)
+
+result = response.json()
+print(result["choices"][0]["message"]["content"])
+```
+
+#### Python（OpenAI SDK）
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="dummy",  # ダミーでOK（プロキシがAPIキーを管理）
+    base_url="https://your-proxy-server.run.app/chat/product-a"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "こんにちは"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+#### JavaScript/TypeScript
+
+```javascript
+const response = await fetch(
+  "https://your-proxy-server.run.app/chat/product-a",
+  {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      model: "gpt-4o",
+      messages: [{role: "user", content: "こんにちは"}]
+    })
+  }
+);
+
+const result = await response.json();
+console.log(result.choices[0].message.content);
+```
+
+### エラーハンドリング
+
+| HTTPステータス | 意味 | 対処方法 |
+| --- | --- | --- |
+| 200 | 成功 | - |
+| 400 | リクエストエラー | リクエストパラメータを確認 |
+| 401 | 認証エラー | IAPでログインしているか確認 |
+| 404 | プロダクトが見つからない | product_idを確認 |
+| 429 | レート制限超過 | 少し待ってから再試行 |
+| 502 | 上流APIエラー | OpenAI/Gemini/Anthropic側のエラー |
+
+### 重要な注意事項
+
+- ⚠️ **APIキーは不要です**。プロキシサーバーが管理します。
+- ⚠️ **APIキーをクライアント側に保存しないでください**。セキュリティリスクがあります。
+- ✅ モデル名を変更するだけで、異なるプロバイダー（OpenAI/Gemini/Anthropic）を使い分けられます。
+- ✅ すべてのレスポンスはOpenAI互換形式で返されます。
+
+---
+
 ## Configuration
 All settings are loaded from environment variables with the prefix `API_KEY_SERVER_`.
 
