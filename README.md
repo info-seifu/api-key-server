@@ -1,9 +1,10 @@
 # API Key Proxy Server
 
-A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on the server side, enforces short-lived client authentication (JWT or HMAC), applies per-product/user rate limits, and forwards allowed chat completion calls to upstream providers like OpenAI.
+A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on the server side, enforces short-lived client authentication (JWT, HMAC, or IAP), applies per-product/user rate limits, and forwards allowed chat completion calls to upstream providers like OpenAI, Gemini, and Anthropic.
 
 ## Features
-- JWT (RS256) or HMAC + timestamp authentication.
+- JWT (RS256), HMAC + timestamp, or Google IAP authentication.
+- Multi-provider support: OpenAI, Google Gemini, Anthropic Claude with automatic provider selection based on model name.
 - Per-product/user token-bucket QPS control and a daily quota guard. Redis-backed when available, with in-memory fallback that also enforces daily quotas.
 - Parameter validation for allowed models, `max_tokens`, and temperature range.
 - Upstream request errors are surfaced as 502 responses rather than generic failures.
@@ -17,15 +18,72 @@ All settings are loaded from environment variables with the prefix `API_KEY_SERV
 
 | Variable | Description | Example |
 | --- | --- | --- |
-| `API_KEY_SERVER_PRODUCT_KEYS` | JSON map of product IDs to upstream API keys. | `{ "product-a": "sk-..." }` |
+| `API_KEY_SERVER_PRODUCT_KEYS` | **(Legacy)** JSON map of product IDs to OpenAI API keys. For backward compatibility. | `{ "product-a": "sk-..." }` |
+| `API_KEY_SERVER_PRODUCT_CONFIGS` | **(Recommended)** JSON map of product IDs to multi-provider configurations. See [Multi-Provider Configuration](#multi-provider-configuration). | See below |
 | `API_KEY_SERVER_JWT_PUBLIC_KEYS` | JSON map of `kid` to RSA public keys for JWT validation. | `{ "kid-1": "-----BEGIN PUBLIC KEY-----..." }` |
 | `API_KEY_SERVER_CLIENT_HMAC_SECRETS` | JSON map of client IDs to HMAC secrets. | `{ "desktop": "shared-secret" }` |
 | `API_KEY_SERVER_ALLOWED_MODELS` | JSON list of allowed models. | `["gpt-4o", "gpt-4o-mini"]` |
 | `API_KEY_SERVER_MAX_TOKENS` | Upper bound for `max_tokens`. | `2048` |
-| `API_KEY_SERVER_OPENAI_BASE_URL` | Upstream chat/completions endpoint. | `https://api.openai.com/v1/chat/completions` |
+| `API_KEY_SERVER_OPENAI_BASE_URL` | **(Legacy)** Upstream chat/completions endpoint for OpenAI. | `https://api.openai.com/v1/chat/completions` |
 | `API_KEY_SERVER_REDIS_URL` | Redis URL for rate limiting (optional). | `redis://:pass@host:6379/0` |
 | `API_KEY_SERVER_REDIS_PREFIX` | Prefix for Redis keys. | `api-key-server` |
 | `API_KEY_SERVER_HMAC_CLOCK_TOLERANCE_SECONDS` | Allowed clock skew for timestamped HMAC. | `300` |
+
+### Multi-Provider Configuration
+
+The server supports configuring multiple AI providers per product. Each provider can have its own API key and supported models list.
+
+**Configuration Format:**
+```json
+{
+  "product-a": {
+    "providers": {
+      "openai": {
+        "api_key": "sk-proj-xxxxxxxxxxxxx",
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]
+      },
+      "gemini": {
+        "api_key": "AIzaSyXXXXXXXXXXXXXXXXXXXXX",
+        "models": ["gemini-1.5-pro", "gemini-1.5-flash"]
+      },
+      "anthropic": {
+        "api_key": "sk-ant-api03-XXXXXXXXXXXXXXX",
+        "models": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
+      }
+    }
+  }
+}
+```
+
+**How it works:**
+- The server automatically selects the appropriate provider based on the model name in the request
+- If `models` list is specified, it matches the requested model against each provider's supported models
+- If `models` list is empty or not specified for a provider, that provider accepts any model name
+- All responses are converted to OpenAI-compatible format regardless of the upstream provider
+
+**Supported Providers:**
+- **OpenAI**: Supports all OpenAI models (gpt-4o, gpt-4o-mini, gpt-3.5-turbo, etc.)
+- **Gemini**: Supports Google Gemini models (gemini-1.5-pro, gemini-1.5-flash, etc.)
+- **Anthropic**: Supports Claude models (claude-3-5-sonnet-20241022, claude-3-opus-20240229, etc.)
+
+**Optional `base_url` parameter:**
+You can specify a custom endpoint URL for each provider:
+```json
+{
+  "product-a": {
+    "providers": {
+      "openai": {
+        "api_key": "sk-proj-xxxxxxxxxxxxx",
+        "base_url": "https://custom-openai-proxy.example.com/v1/chat/completions",
+        "models": ["gpt-4o"]
+      }
+    }
+  }
+}
+```
+
+**Backward Compatibility:**
+The server still supports the legacy `PRODUCT_KEYS` format for OpenAI-only configurations. If both formats are present, the new multi-provider format takes precedence.
 
 ### Secret Manager Integration (Recommended for Production)
 
@@ -63,8 +121,39 @@ uvicorn app.main:app --reload --port 8080
 ### Option 1: Using Secret Manager (Recommended)
 
 **Step 1: Create secrets in Secret Manager**
+
+**Option A: Multi-Provider Configuration (Recommended)**
 ```bash
-# Create product keys secret
+# Create product configs secret with multiple providers
+cat > product-keys.json <<EOF
+{
+  "product-a": {
+    "providers": {
+      "openai": {
+        "api_key": "sk-proj-xxxxxxxxxxxxx",
+        "models": ["gpt-4o", "gpt-4o-mini"]
+      },
+      "gemini": {
+        "api_key": "AIzaSyXXXXXXXXXXXXXXXXXXXXX",
+        "models": ["gemini-1.5-pro", "gemini-1.5-flash"]
+      },
+      "anthropic": {
+        "api_key": "sk-ant-api03-XXXXXXXXXXXXXXX",
+        "models": ["claude-3-5-sonnet-20241022"]
+      }
+    }
+  }
+}
+EOF
+
+gcloud secrets create openai-api-keys \
+  --data-file=product-keys.json \
+  --replication-policy=automatic
+```
+
+**Option B: Legacy Single-Provider Configuration (OpenAI only)**
+```bash
+# Create product keys secret (legacy format)
 cat > product-keys.json <<EOF
 {
   "product-a": "sk-xxxxxxxxxxxxx",
@@ -75,6 +164,7 @@ EOF
 gcloud secrets create openai-api-keys \
   --data-file=product-keys.json \
   --replication-policy=automatic
+```
 
 # Create JWT public keys secret
 cat > jwt-keys.json <<EOF

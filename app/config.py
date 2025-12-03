@@ -13,6 +13,25 @@ from .secrets import load_secret_as_dict, should_use_secret_manager
 logger = logging.getLogger("api-key-server.config")
 
 
+class ProviderConfig(BaseModel):
+    """Configuration for a single AI provider."""
+    api_key: str
+    models: List[str] = Field(default_factory=list)
+    base_url: Optional[str] = None  # Optional custom endpoint
+
+
+class ProductConfig(BaseModel):
+    """Configuration for a product with multiple providers."""
+    providers: Dict[str, ProviderConfig] = Field(default_factory=dict)
+
+    def get_provider_for_model(self, model: str) -> Optional[tuple[str, ProviderConfig]]:
+        """Find the provider that supports the given model."""
+        for provider_name, provider_config in self.providers.items():
+            if not provider_config.models or model in provider_config.models:
+                return (provider_name, provider_config)
+        return None
+
+
 class RateLimitConfig(BaseModel):
     bucket_capacity: int = 10
     bucket_refill_per_second: float = 5.0
@@ -30,7 +49,12 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1/chat/completions"
     request_timeout_seconds: int = 30
 
+    # Legacy configuration (backward compatibility)
     product_keys: Dict[str, str] = Field(default_factory=dict)
+
+    # New multi-provider configuration
+    product_configs: Dict[str, ProductConfig] = Field(default_factory=dict)
+
     jwt_public_keys: Dict[str, str] = Field(default_factory=dict)
     client_hmac_secrets: Dict[str, str] = Field(default_factory=dict)
 
@@ -52,7 +76,7 @@ class Settings(BaseSettings):
     @validator("product_keys", pre=True)
     def _parse_json_dict(cls, value: object) -> Dict[str, str]:
         if should_use_secret_manager() and not value:
-            logger.info("Loading product_keys from Secret Manager")
+            logger.info("Loading product_keys from Secret Manager (legacy format)")
             project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
             secret_name = os.environ.get("API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME", "openai-api-keys")
             try:
@@ -61,6 +85,35 @@ class Settings(BaseSettings):
                 logger.error(f"Failed to load product_keys from Secret Manager: {e}")
                 raise
         return cls._parse_dict_field(value)
+
+    @validator("product_configs", pre=True)
+    def _parse_product_configs(cls, value: object) -> Dict[str, ProductConfig]:
+        if should_use_secret_manager() and not value:
+            logger.info("Loading product_configs from Secret Manager")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get("API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME", "openai-api-keys")
+            try:
+                raw_data = load_secret_as_dict(secret_name, project_id)
+                # Check if it's the new format (nested providers)
+                if raw_data and any(isinstance(v, dict) and "providers" in v for v in raw_data.values()):
+                    logger.info("Detected multi-provider configuration format")
+                    return {k: ProductConfig(**v) for k, v in raw_data.items()}
+                else:
+                    logger.info("Legacy format detected, skipping product_configs")
+                    return {}
+            except Exception as e:
+                logger.warning(f"Failed to load product_configs from Secret Manager: {e}")
+                return {}
+
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            # Parse nested configuration
+            return {k: ProductConfig(**v) if isinstance(v, dict) else v for k, v in value.items()}
+        if isinstance(value, str) and value.strip():
+            raw_data = json.loads(value)
+            return {k: ProductConfig(**v) for k, v in raw_data.items()}
+        return {}
 
     @validator("jwt_public_keys", pre=True)
     def _parse_jwt_keys(cls, value: object) -> Dict[str, str]:

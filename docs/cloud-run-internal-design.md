@@ -1,8 +1,8 @@
 # Cloud Run を社内専用に閉じるプロキシ設計書
 
-最終更新: 2025-12-02 (Asia/Tokyo)
+最終更新: 2025-12-03 (Asia/Tokyo)
 
-本書は、OpenAI 等の外部APIキーをサーバ側のみで保持しながら、**Cloud Run を「社内からのみ」利用可能なプロキシ**として運用するための設計を示す。運用コストを抑えつつ、鍵の悪用や第三者の不正利用を防ぐことを目的とする。
+本書は、OpenAI、Google Gemini、Anthropic Claude 等の外部APIキーをサーバ側のみで保持しながら、**Cloud Run を「社内からのみ」利用可能なプロキシ**として運用するための設計を示す。運用コストを抑えつつ、鍵の悪用や第三者の不正利用を防ぐことを目的とする。
 
 ---
 
@@ -11,7 +11,8 @@
 ### 1.1 目的
 - クライアント配布アプリ（Windows等）から直接外部APIに触れさせず、**Cloud Run のプロキシ経由**で呼び出す。
 - **社内アクセスのみ**許容し、社外からの到達・濫用を防ぐ。
-- **プロダクト＝Project＝APIキー**を分割し、鍵の影響範囲を最小化。
+- **プロダクト単位で複数のAIプロバイダー（OpenAI、Gemini、Anthropic等）**を設定し、鍵の影響範囲を最小化。
+- モデル名に基づいて自動的に適切なプロバイダーを選択し、レスポンスをOpenAI互換形式で返却。
 
 ### 1.2 機能要件
 - Chat/Completions 等の少数APIパスを提供（最小限）。
@@ -30,23 +31,27 @@
 
 ```
 [Client (社内PC/VM)]
-     │ HTTPS
+     │ HTTPS (OpenAI互換リクエスト + モデル名指定)
      ▼
 [HTTPS LB + Cloud Armor (WAF/Rate rules/IP許可)]
      │ IAP/ID Token or Authenticated invocations
      ▼
 [Cloud Run (FastAPI Proxy)]
-     │ ├─ Secret Manager (OpenAIキー 他)  [読み取りのみ]
+     │ ├─ Secret Manager (マルチプロバイダー設定)  [読み取りのみ]
      │ ├─ Memorystore / Redis (レート制限/トークン管理)
+     │ ├─ Provider Adapters (OpenAI/Gemini/Anthropic)
      │ └─ Cloud Logging/Monitoring (監査・アラート)
      ▼
-[External API (OpenAI 等)]
+[External API (OpenAI / Gemini / Anthropic)]
+     ▼
+[OpenAI互換形式のレスポンスに統一して返却]
 ```
 
 - **入口**は LB + **Cloud Armor**。IAP もしくは Cloud Run の**認証必須**で保護。
-- **アプリ内でも**短寿命トークン検証（JWT/HMAC）を実施（二重ロック）。
-- **Secret Manager**で鍵を保管。**ログはマスク**。
+- **アプリ内でも**短寿命トークン検証（JWT/HMAC/IAP JWT）を実施（二重ロック）。
+- **Secret Manager**で複数プロバイダーの鍵を保管。**ログはマスク**。
 - **Redis**でレート制限/日次上限を実装。
+- **プロバイダーアダプター**がモデル名に基づいて適切なプロバイダーを選択し、リクエスト/レスポンス形式を変換。
 
 ---
 
@@ -70,7 +75,8 @@
 ## 4. アプリ層のセキュリティ
 
 ### 4.1 クライアント認証（いずれか/併用可）
-- **短寿命JWT**（推奨）：RS256、TTL 5〜15分、`kid`で鍵ローテ。サーバ側は**公開鍵のみ**保持。
+- **Google IAP JWT**（推奨 for ブラウザベースアプリ）：IAP が発行する JWT トークンを検証。Google Workspace 認証と統合可能。
+- **短寿命JWT**：RS256、TTL 5〜15分、`kid`で鍵ローテ。サーバ側は**公開鍵のみ**保持。
 - **HMAC + Timestamp**：`X-Timestamp` ±300秒、`X-Signature`（メソッド/パス/ボディハッシュを署名）。
 
 > いずれの場合も**漏えい時の影響時間を最小化**。クライアントID/プロダクトIDを必ず埋め込む。
@@ -124,6 +130,92 @@ gcloud run deploy api-key-server \
 - 開発環境では環境変数を使用（ローカルテスト用）
 - シークレットのバージョンは `latest` ではなく特定バージョンを指定することを検討
 
+### 4.5 マルチプロバイダー設定
+
+本プロキシは **複数のAIプロバイダーを同時に使用できる設定** をサポートしています。
+
+#### 4.5.1 設定形式
+
+**新形式（マルチプロバイダー、推奨）:**
+```json
+{
+  "product-a": {
+    "providers": {
+      "openai": {
+        "api_key": "sk-proj-xxxxxxxxxxxxx",
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]
+      },
+      "gemini": {
+        "api_key": "AIzaSyXXXXXXXXXXXXXXXXXXXXX",
+        "models": ["gemini-1.5-pro", "gemini-1.5-flash"]
+      },
+      "anthropic": {
+        "api_key": "sk-ant-api03-XXXXXXXXXXXXXXX",
+        "models": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
+      }
+    }
+  }
+}
+```
+
+**従来形式（OpenAIのみ、後方互換）:**
+```json
+{
+  "product-a": "sk-xxxxxxxxxxxxx",
+  "product-b": "sk-yyyyyyyyyyy"
+}
+```
+
+#### 4.5.2 プロバイダー選択ロジック
+
+1. クライアントが OpenAI 互換形式でリクエストを送信（モデル名を含む）
+2. サーバーはモデル名を確認し、設定された各プロバイダーの `models` リストと照合
+3. マッチしたプロバイダーのアダプターを使用してリクエストを変換・転送
+4. プロバイダーからのレスポンスを OpenAI 互換形式に変換して返却
+
+#### 4.5.3 サポート対象プロバイダー
+
+| プロバイダー | 実装ファイル | 変換処理 | モデル例 |
+| --- | --- | --- | --- |
+| OpenAI | `app/providers/openai.py` | なし（標準形式） | gpt-4o, gpt-4o-mini, gpt-3.5-turbo |
+| Google Gemini | `app/providers/gemini.py` | リクエスト/レスポンス変換あり | gemini-1.5-pro, gemini-1.5-flash |
+| Anthropic Claude | `app/providers/anthropic.py` | リクエスト/レスポンス変換あり | claude-3-5-sonnet-20241022, claude-3-opus-20240229 |
+
+#### 4.5.4 課金・利用量分離
+
+同一プロバイダーでも別々のAPIキーを設定することで、プロジェクトごとの課金を分離できます：
+
+```json
+{
+  "research-team": {
+    "providers": {
+      "gemini": {
+        "api_key": "AIzaSy_RESEARCH_PROJECT_KEY",
+        "models": ["gemini-1.5-pro"]
+      }
+    }
+  },
+  "development-team": {
+    "providers": {
+      "gemini": {
+        "api_key": "AIzaSy_DEVELOPMENT_PROJECT_KEY",
+        "models": ["gemini-1.5-flash"]
+      }
+    }
+  }
+}
+```
+
+#### 4.5.5 新規プロバイダーの追加
+
+新しいAIプロバイダーを追加する場合：
+
+1. `app/providers/` 配下に新しいプロバイダークラスを作成
+2. `call()` メソッドを実装（`api_key`, `payload`, `base_url`, `timeout` を受け取る）
+3. OpenAI形式へのリクエスト/レスポンス変換ロジックを実装
+4. `app/upstream.py` の `PROVIDERS` 辞書に登録
+5. Secret Manager の設定に新プロバイダーのキーを追加
+
 ---
 
 ## 5. 監査・可観測性
@@ -150,8 +242,39 @@ gcloud run deploy api-key-server \
 
 ### 6.2 Secret Manager
 **シークレットの作成:**
+
+**マルチプロバイダー設定（推奨）:**
 ```bash
-# プロダクトキー（JSON形式）
+# プロダクトキー（マルチプロバイダー形式）
+cat > product-keys.json <<EOF
+{
+  "product-a": {
+    "providers": {
+      "openai": {
+        "api_key": "sk-proj-xxxxxxxxxxxxx",
+        "models": ["gpt-4o", "gpt-4o-mini"]
+      },
+      "gemini": {
+        "api_key": "AIzaSyXXXXXXXXXXXXXXXXXXXXX",
+        "models": ["gemini-1.5-pro", "gemini-1.5-flash"]
+      },
+      "anthropic": {
+        "api_key": "sk-ant-api03-XXXXXXXXXXXXXXX",
+        "models": ["claude-3-5-sonnet-20241022"]
+      }
+    }
+  }
+}
+EOF
+
+gcloud secrets create openai-api-keys \
+  --data-file=product-keys.json \
+  --replication-policy=automatic
+```
+
+**従来形式（OpenAIのみ、後方互換）:**
+```bash
+# プロダクトキー（従来形式）
 cat > product-keys.json <<EOF
 {
   "product-a": "sk-xxxxxxxxxxxxx",
@@ -162,6 +285,7 @@ EOF
 gcloud secrets create openai-api-keys \
   --data-file=product-keys.json \
   --replication-policy=automatic
+```
 
 # JWT公開鍵（JSON形式）
 cat > jwt-keys.json <<EOF
@@ -308,9 +432,11 @@ gcloud run deploy api-key-server \
 
 ## 11. 将来拡張
 
-- **プロダクト追加**：`product_id → Project/キー` を1:1で追加。コード変更は辞書追加で完結。  
-- **社外公開への段階的移行**：IAP 外し + 強めのアプリ認証/Cloud Armor/プライシング制御を追設。  
+- **プロダクト追加**：Secret Manager の設定に新しいプロダクトとプロバイダー設定を追加するだけ。コード変更不要。
+- **新規プロバイダー追加**：`app/providers/` に新プロバイダークラスを追加し、`upstream.py` の `PROVIDERS` 辞書に登録。
+- **社外公開への段階的移行**：IAP 外し + 強めのアプリ認証/Cloud Armor/プライシング制御を追設。
 - **多地域**：利用者分布に応じてリージョンを追加、LB で振り分け。
+- **ストリーミング対応**：各プロバイダーアダプターでストリーミングレスポンスの変換を実装。
 
 ---
 
