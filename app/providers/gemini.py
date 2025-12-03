@@ -141,3 +141,200 @@ class GeminiProvider:
         }
 
         return openai_response
+
+    @staticmethod
+    async def call_image(api_key: str, payload: dict, base_url: str | None = None, timeout: int = 30) -> dict:
+        """
+        Call Google Gemini image generation API.
+
+        Args:
+            api_key: Google API key
+            payload: Request payload (OpenAI format)
+            base_url: Custom endpoint URL (optional)
+            timeout: Request timeout in seconds
+
+        Returns:
+            Response in OpenAI-compatible format
+        """
+        model = payload.get("model", "gemini-3-pro-image-preview")
+        prompt = payload.get("prompt", "")
+
+        # Build URL - Gemini uses Imagen for image generation
+        if base_url:
+            url = base_url
+        else:
+            # Use Imagen API endpoint
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImage"
+
+        url = f"{url}?key={api_key}"
+
+        # Convert OpenAI format to Gemini Imagen format
+        gemini_payload = {
+            "prompt": {
+                "text": prompt
+            }
+        }
+
+        # Add optional parameters
+        if "n" in payload:
+            gemini_payload["sampleCount"] = payload["n"]
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=gemini_payload)
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini API request failed: {str(exc)}"
+            )
+
+        if response.status_code >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini service error"
+            )
+        if response.status_code == 401 or response.status_code == 403:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini authentication failed"
+            )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=response.text
+            )
+
+        # Convert Gemini response to OpenAI format
+        gemini_response = response.json()
+        images = gemini_response.get("generatedImages", [])
+
+        # Build OpenAI-compatible response
+        openai_response = {
+            "created": 0,
+            "data": []
+        }
+
+        for img in images:
+            # Gemini returns base64 encoded images
+            image_data = img.get("image", "")
+            openai_response["data"].append({
+                "b64_json": image_data if payload.get("response_format") == "b64_json" else None,
+                "url": f"data:image/png;base64,{image_data}" if payload.get("response_format") != "b64_json" else None
+            })
+
+        return openai_response
+
+    @staticmethod
+    async def call_audio(api_key: str, payload: dict, base_url: str | None = None, timeout: int = 30):
+        """
+        Call Google Gemini audio generation (TTS) API.
+
+        Args:
+            api_key: Google API key
+            payload: Request payload (OpenAI format)
+            base_url: Custom endpoint URL (optional)
+            timeout: Request timeout in seconds
+
+        Returns:
+            Response with audio data
+        """
+        from fastapi.responses import Response
+
+        model = payload.get("model", "gemini-2.5-pro-preview-tts")
+        text_input = payload.get("input", "")
+
+        # Build URL
+        if base_url:
+            url = base_url
+        else:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+        url = f"{url}?key={api_key}"
+
+        # Build Gemini payload for audio generation
+        gemini_payload = {
+            "contents": [{
+                "parts": [{
+                    "text": text_input
+                }]
+            }],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"]
+            }
+        }
+
+        # Add voice/speed if supported
+        if "voice" in payload or "speed" in payload:
+            speech_config = {}
+            if "voice" in payload:
+                speech_config["voiceConfig"] = {"prebuiltVoiceConfig": {"voiceName": payload["voice"]}}
+            gemini_payload["generationConfig"]["speechConfig"] = speech_config
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, json=gemini_payload)
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini API request failed: {str(exc)}"
+            )
+
+        if response.status_code >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini service error"
+            )
+        if response.status_code == 401 or response.status_code == 403:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Gemini authentication failed"
+            )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=response.text
+            )
+
+        # Extract audio from Gemini response
+        gemini_response = response.json()
+        candidates = gemini_response.get("candidates", [])
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No candidates in Gemini response"
+            )
+
+        # Get inline audio data
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+
+        # Find audio part
+        audio_data = None
+        for part in parts:
+            if "inlineData" in part:
+                inline_data = part["inlineData"]
+                if "audio/" in inline_data.get("mimeType", ""):
+                    audio_data = inline_data.get("data")
+                    break
+
+        if not audio_data:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No audio data in Gemini response"
+            )
+
+        # Convert base64 to binary
+        import base64
+        audio_bytes = base64.b64decode(audio_data)
+
+        # Return audio response
+        response_format = payload.get("response_format", "mp3")
+        content_type_map = {
+            "mp3": "audio/mpeg",
+            "opus": "audio/opus",
+            "aac": "audio/aac",
+            "flac": "audio/flac"
+        }
+        content_type = content_type_map.get(response_format, "audio/mpeg")
+
+        return Response(content=audio_bytes, media_type=content_type)

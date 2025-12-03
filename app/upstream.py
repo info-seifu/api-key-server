@@ -17,7 +17,7 @@ PROVIDERS = {
 }
 
 
-async def call_ai_service(product_id: str, payload: dict, settings: Settings) -> dict:
+async def call_ai_service(product_id: str, payload: dict, settings: Settings, endpoint_type: str = "chat") -> dict:
     """
     Call AI service based on product configuration.
     Supports both legacy (single API key) and new (multi-provider) formats.
@@ -26,6 +26,7 @@ async def call_ai_service(product_id: str, payload: dict, settings: Settings) ->
         product_id: Product identifier
         payload: Request payload (OpenAI-compatible format)
         settings: Application settings
+        endpoint_type: Type of endpoint ("chat", "image", "audio")
 
     Returns:
         Response from AI service (OpenAI-compatible format)
@@ -54,14 +55,30 @@ async def call_ai_service(product_id: str, payload: dict, settings: Settings) ->
             )
 
         provider_class = PROVIDERS[provider_name]
-        logger.info(f"Using provider '{provider_name}' for model '{model}' in product '{product_id}'")
+        logger.info(f"Using provider '{provider_name}' for model '{model}' in product '{product_id}' (endpoint: {endpoint_type})")
 
-        return await provider_class.call(
-            api_key=provider_config.api_key,
-            payload=payload,
-            base_url=provider_config.base_url,
-            timeout=settings.request_timeout_seconds
-        )
+        # Call appropriate provider method based on endpoint type
+        if endpoint_type == "image":
+            return await provider_class.call_image(
+                api_key=provider_config.api_key,
+                payload=payload,
+                base_url=provider_config.base_url,
+                timeout=settings.request_timeout_seconds
+            )
+        elif endpoint_type == "audio":
+            return await provider_class.call_audio(
+                api_key=provider_config.api_key,
+                payload=payload,
+                base_url=provider_config.base_url,
+                timeout=settings.request_timeout_seconds
+            )
+        else:  # chat
+            return await provider_class.call(
+                api_key=provider_config.api_key,
+                payload=payload,
+                base_url=provider_config.base_url,
+                timeout=settings.request_timeout_seconds
+            )
 
     # Fallback to legacy format (single OpenAI API key)
     elif product_id in settings.product_keys:

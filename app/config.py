@@ -6,7 +6,8 @@ import os
 from functools import lru_cache
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, BaseSettings, Field, validator
+from pydantic import BaseModel, Field, validator
+from pydantic_settings import BaseSettings
 
 from .secrets import load_secret_as_dict, should_use_secret_manager
 
@@ -73,18 +74,18 @@ class Settings(BaseSettings):
         env_prefix = "API_KEY_SERVER_"
         env_file = ".env"
 
-    @validator("product_keys", pre=True)
-    def _parse_json_dict(cls, value: object) -> Dict[str, str]:
-        if should_use_secret_manager() and not value:
-            logger.info("Loading product_keys from Secret Manager (legacy format)")
-            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
-            secret_name = os.environ.get("API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME", "openai-api-keys")
-            try:
-                return load_secret_as_dict(secret_name, project_id)
-            except Exception as e:
-                logger.error(f"Failed to load product_keys from Secret Manager: {e}")
-                raise
-        return cls._parse_dict_field(value)
+    def get_allowed_models_for_product(self, product_id: str) -> List[str]:
+        """Get all allowed models for a given product from product_configs."""
+        if product_id in self.product_configs:
+            config = self.product_configs[product_id]
+            models = []
+            for provider_config in config.providers.values():
+                models.extend(provider_config.models)
+            return models
+        # Fallback to legacy product_keys (single provider)
+        if product_id in self.product_keys:
+            return self.allowed_models
+        return []
 
     @validator("product_configs", pre=True)
     def _parse_product_configs(cls, value: object) -> Dict[str, ProductConfig]:
@@ -114,6 +115,24 @@ class Settings(BaseSettings):
             raw_data = json.loads(value)
             return {k: ProductConfig(**v) for k, v in raw_data.items()}
         return {}
+
+    @validator("product_keys", pre=True)
+    def _parse_json_dict(cls, value: object) -> Dict[str, str]:
+        if should_use_secret_manager() and not value:
+            logger.info("Loading product_keys from Secret Manager (legacy format)")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get("API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME", "openai-api-keys")
+            try:
+                raw_data = load_secret_as_dict(secret_name, project_id)
+                # Check if it's the new multi-provider format - if so, return empty dict
+                if raw_data and any(isinstance(v, dict) and "providers" in v for v in raw_data.values()):
+                    logger.info("Multi-provider format detected in product_keys validator, skipping")
+                    return {}
+                return raw_data
+            except Exception as e:
+                logger.error(f"Failed to load product_keys from Secret Manager: {e}")
+                raise
+        return cls._parse_dict_field(value)
 
     @validator("jwt_public_keys", pre=True)
     def _parse_jwt_keys(cls, value: object) -> Dict[str, str]:

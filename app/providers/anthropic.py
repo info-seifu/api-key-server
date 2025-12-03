@@ -140,3 +140,19 @@ class AnthropicProvider:
         }
 
         return openai_response
+
+    @staticmethod
+    async def call_image(api_key: str, payload: dict, base_url: str | None = None, timeout: int = 30) -> dict:
+        """Anthropic does not support image generation."""
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Anthropic does not support image generation"
+        )
+
+    @staticmethod
+    async def call_audio(api_key: str, payload: dict, base_url: str | None = None, timeout: int = 30):
+        """Anthropic does not support audio generation."""
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Anthropic does not support audio generation"
+        )
