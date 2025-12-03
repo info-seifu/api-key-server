@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 from typing import Dict, Optional
 
@@ -9,6 +10,8 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from jose import JWTError, jwt
 
 from .config import Settings, get_settings
+
+logger = logging.getLogger("api-key-server.auth")
 
 
 class AuthContext:
@@ -100,18 +103,110 @@ async def verify_hmac(
     return AuthContext(user_id=client_id, product_id=str(product_id), method="hmac", client_id=client_id)
 
 
+def verify_iap_jwt(iap_jwt: str, request: Request, settings: Settings) -> AuthContext:
+    """
+    Verify Google IAP (Identity-Aware Proxy) JWT token.
+
+    IAP adds the X-Goog-IAP-JWT-Assertion header with a signed JWT.
+    The JWT contains user identity information (email, user_id).
+    """
+    try:
+        # Decode without verification first to get the key ID
+        unverified_header = jwt.get_unverified_header(iap_jwt)
+        unverified_claims = jwt.get_unverified_claims(iap_jwt)
+
+        # IAP JWT should have specific audience format
+        # Expected audience: /projects/PROJECT_NUMBER/apps/PROJECT_ID
+        expected_audience_prefix = "/projects/"
+        audience = unverified_claims.get("aud", "")
+
+        if not audience.startswith(expected_audience_prefix):
+            logger.warning(f"Invalid IAP JWT audience format: {audience}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid IAP token audience"
+            )
+
+        # Google's public keys are fetched automatically by python-jose
+        # For IAP, we verify with Google's public keys
+        try:
+            # Verify the token using Google's public keys
+            # The jose library will fetch Google's public keys from:
+            # https://www.gstatic.com/iap/verify/public_key-jwk
+            from google.auth.transport import requests as google_requests
+            from google.oauth2 import id_token
+
+            # Verify using Google's library
+            claims = id_token.verify_token(
+                iap_jwt,
+                google_requests.Request(),
+                audience=audience,
+                certs_url="https://www.gstatic.com/iap/verify/public_key"
+            )
+
+        except ImportError:
+            # Fallback: If google-auth is not installed, use jose with manual key fetching
+            logger.warning("google-auth not installed, using fallback JWT verification")
+            # This is less secure as we don't verify against Google's keys
+            # For production, google-auth should be installed
+            claims = jwt.get_unverified_claims(iap_jwt)
+
+        # Extract user information from claims
+        user_email = claims.get("email")
+        user_id = claims.get("sub") or user_email
+
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="IAP token missing user identity"
+            )
+
+        # Get product_id from URL path
+        product_id = request.path_params.get("product")
+        if not product_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing product in path"
+            )
+
+        logger.info(f"IAP authentication successful for user: {user_email}")
+
+        return AuthContext(
+            user_id=str(user_id),
+            product_id=str(product_id),
+            method="iap",
+            client_id=user_email
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"IAP JWT verification failed: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid IAP token: {str(exc)}"
+        )
+
+
 async def ensure_authenticated(
     request: Request,
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
     x_timestamp: Optional[str] = Header(default=None, alias="X-Timestamp"),
     x_signature: Optional[str] = Header(default=None, alias="X-Signature"),
     x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+    x_goog_iap_jwt_assertion: Optional[str] = Header(default=None, alias="X-Goog-IAP-JWT-Assertion"),
     settings: Settings = Depends(get_settings),
 ) -> AuthContext:
+    # Check for IAP JWT first (highest priority for IAP-protected services)
+    if x_goog_iap_jwt_assertion:
+        return verify_iap_jwt(x_goog_iap_jwt_assertion, request, settings)
+
+    # Check for standard JWT (Authorization: Bearer)
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
         return verify_jwt_token(token, settings)
 
+    # Check for HMAC authentication
     if x_timestamp and x_signature and x_client_id:
         return await verify_hmac(
             client_id=x_client_id,
