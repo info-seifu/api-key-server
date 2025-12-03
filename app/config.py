@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     jwt_audience: str = "api-key-server"
     hmac_clock_tolerance_seconds: int = 300
     openai_base_url: str = "https://api.openai.com/v1/chat/completions"
-    request_timeout_seconds: int = 30
+    request_timeout_seconds: int = 90
 
     # Legacy configuration (backward compatibility)
     product_keys: Dict[str, str] = Field(default_factory=dict)

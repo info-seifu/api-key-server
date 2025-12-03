@@ -103,11 +103,11 @@ async def chat_completions(
 class ImageGenerationRequest(BaseModel):
     model: str
     prompt: str
-    n: Optional[int] = Field(default=1, description="Number of images to generate")
-    size: Optional[str] = Field(default="1024x1024", description="Image size")
-    quality: Optional[str] = Field(default="standard", description="Image quality (standard or hd)")
-    style: Optional[str] = Field(default="vivid", description="Image style (vivid or natural)")
-    response_format: Optional[str] = Field(default="url", description="Response format (url or b64_json)")
+    n: Optional[int] = Field(default=None, description="Number of images to generate")
+    size: Optional[str] = Field(default=None, description="Image size")
+    quality: Optional[str] = Field(default=None, description="Image quality (standard or hd)")
+    style: Optional[str] = Field(default=None, description="Image style (vivid or natural)")
+    response_format: Optional[str] = Field(default=None, description="Response format (url or b64_json)")
 
 
 @app.post("/v1/images/generations/{product}")
@@ -151,9 +151,9 @@ async def image_generations(
 class AudioSpeechRequest(BaseModel):
     model: str
     input: str = Field(description="Text to convert to speech")
-    voice: Optional[str] = Field(default="alloy", description="Voice to use")
-    response_format: Optional[str] = Field(default="mp3", description="Audio format (mp3, opus, aac, flac)")
-    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0, description="Speed of speech")
+    voice: Optional[str] = Field(default=None, description="Voice to use")
+    response_format: Optional[str] = Field(default=None, description="Audio format (mp3, opus, aac, flac)")
+    speed: Optional[float] = Field(default=None, ge=0.25, le=4.0, description="Speed of speech")
 
 
 @app.post("/v1/audio/speech/{product}")
