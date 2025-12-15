@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Dict, Tuple
 
 from fastapi import HTTPException, status
@@ -61,24 +62,33 @@ class RateLimiter:
             bucket = self._buckets[key]
 
         if not await bucket.consume():
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+            # 次回リトライまでの待機時間を計算
+            wait_seconds = max(1, int((1.0 - bucket.tokens) / self.settings.rate_limit.bucket_refill_per_second) + 1)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Try again in {wait_seconds} seconds"
+            )
 
         async with self._lock:
-            today = time.strftime("%Y-%m-%d")
+            # UTC基準で日付を取得（Cloud Runのデフォルトタイムゾーン）
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             stored_day, used = self._daily_usage.get(key, (today, 0))
             if stored_day != today:
                 used = 0
                 stored_day = today
             if used >= self.settings.rate_limit.daily_quota:
                 raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily quota exceeded"
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Daily quota exceeded ({self.settings.rate_limit.daily_quota} requests/day)"
                 )
             self._daily_usage[key] = (stored_day, used + 1)
 
     async def _check_with_redis(self, product_id: str, user_id: str) -> None:
         assert self._redis is not None
         bucket_key = f"{self.settings.redis_prefix}:bucket:{product_id}:{user_id}"
-        quota_key = f"{self.settings.redis_prefix}:quota:{product_id}:{user_id}:{time.strftime('%Y-%m-%d')}"
+        # UTC基準で日付を取得（Cloud Runのデフォルトタイムゾーン）
+        today_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        quota_key = f"{self.settings.redis_prefix}:quota:{product_id}:{user_id}:{today_utc}"
 
         script = """
         local bucket_key = KEYS[1]
@@ -134,7 +144,15 @@ class RateLimiter:
         )
 
         if used > daily_quota:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Daily quota exceeded")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Daily quota exceeded ({daily_quota} requests/day)"
+            )
 
         if allowed != 1:
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+            # Redisモードでは正確な待機時間計算が困難なため、概算値を返す
+            wait_seconds = max(1, int(1.0 / self.settings.rate_limit.bucket_refill_per_second) + 1)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Try again in {wait_seconds} seconds"
+            )
