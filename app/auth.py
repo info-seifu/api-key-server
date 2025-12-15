@@ -53,7 +53,9 @@ def verify_jwt_token(token: str, settings: Settings) -> AuthContext:
     try:
         payload = jwt.decode(token, public_key, algorithms=["RS256"], audience=settings.jwt_audience)
     except JWTError as exc:  # type: ignore[catching-non-exception]
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+        # 内部ログには詳細を記録、クライアントには一般的なメッセージ
+        logger.warning(f"JWT verification failed: {exc}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
     product_id = payload.get("product")
@@ -94,6 +96,16 @@ async def verify_hmac(
     body = await _read_body(request)
     computed = _calculate_hmac_signature(secret, timestamp, request.method, request.url.path, body)
     if not hmac.compare_digest(computed, signature):
+        # ログには詳細情報を記録（computed/signatureは含めない - Secret漏洩リスク）
+        logger.warning(
+            "HMAC signature mismatch",
+            extra={
+                "client_id": client_id,
+                "timestamp": timestamp,
+                "method": request.method,
+                "path": request.url.path,
+            }
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signature mismatch")
 
     product_id = request.path_params.get("product")
@@ -145,11 +157,12 @@ def verify_iap_jwt(iap_jwt: str, request: Request, settings: Settings) -> AuthCo
             )
 
         except ImportError:
-            # Fallback: If google-auth is not installed, use jose with manual key fetching
-            logger.warning("google-auth not installed, using fallback JWT verification")
-            # This is less secure as we don't verify against Google's keys
-            # For production, google-auth should be installed
-            claims = jwt.get_unverified_claims(iap_jwt)
+            # google-auth is required for IAP JWT verification
+            logger.error("google-auth not installed - IAP verification disabled")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="IAP verification unavailable"
+            )
 
         # Extract user information from claims
         user_email = claims.get("email")
