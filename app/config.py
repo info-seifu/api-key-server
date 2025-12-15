@@ -103,8 +103,8 @@ class Settings(BaseSettings):
                     logger.info("Legacy format detected, skipping product_configs")
                     return {}
             except Exception as e:
-                logger.warning(f"Failed to load product_configs from Secret Manager: {e}")
-                return {}
+                logger.error(f"Failed to load product_configs from Secret Manager: {e}")
+                raise
 
         if value is None:
             return {}
@@ -143,8 +143,8 @@ class Settings(BaseSettings):
             try:
                 return load_secret_as_dict(secret_name, project_id)
             except Exception as e:
-                logger.warning(f"Failed to load jwt_public_keys from Secret Manager: {e}")
-                return {}
+                logger.error(f"Failed to load jwt_public_keys from Secret Manager: {e}")
+                raise
         return cls._parse_dict_field(value)
 
     @validator("client_hmac_secrets", pre=True)
@@ -156,8 +156,8 @@ class Settings(BaseSettings):
             try:
                 return load_secret_as_dict(secret_name, project_id)
             except Exception as e:
-                logger.warning(f"Failed to load client_hmac_secrets from Secret Manager: {e}")
-                return {}
+                logger.error(f"Failed to load client_hmac_secrets from Secret Manager: {e}")
+                raise
         return cls._parse_dict_field(value)
 
     @staticmethod

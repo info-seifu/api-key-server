@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import httpx
 from fastapi import HTTPException, status
+
+logger = logging.getLogger("api-key-server.providers.openai")
 
 
 class OpenAIProvider:
@@ -52,9 +55,11 @@ class OpenAIProvider:
                 detail="OpenAI authentication failed"
             )
         if response.status_code >= 400:
+            # 内部ログには詳細を記録、クライアントには一般的なメッセージ
+            logger.warning(f"OpenAI API error: {response.status_code} - {response.text}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=response.text
+                detail="Invalid request parameters"
             )
 
         return response.json()
@@ -106,9 +111,11 @@ class OpenAIProvider:
                 detail="OpenAI authentication failed"
             )
         if response.status_code >= 400:
+            # 内部ログには詳細を記録、クライアントには一般的なメッセージ
+            logger.warning(f"OpenAI image API error: {response.status_code} - {response.text}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=response.text
+                detail="Invalid request parameters"
             )
 
         return response.json()
@@ -161,9 +168,11 @@ class OpenAIProvider:
                 detail="OpenAI authentication failed"
             )
         if response.status_code >= 400:
+            # 内部ログには詳細を記録、クライアントには一般的なメッセージ
+            logger.warning(f"OpenAI audio API error: {response.status_code} - {response.text}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=response.text
+                detail="Invalid request parameters"
             )
 
         # For audio, return binary content with proper content type
