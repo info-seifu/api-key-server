@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field, validator
 
 from .auth import AuthContext, ensure_authenticated
 from .config import Settings, get_settings
+from .providers.gemini_image import GeminiImageProvider
 from .rate_limit import RateLimiter
 from .upstream import call_openai, call_ai_service
 
@@ -156,6 +157,19 @@ class AudioSpeechRequest(BaseModel):
     speed: Optional[float] = Field(default=None, ge=0.25, le=4.0, description="Speed of speech")
 
 
+class GeminiImageRequest(BaseModel):
+    """Gemini 3 Pro Image画像生成リクエスト"""
+    model: str = Field(
+        default="gemini-3-pro-image-preview",
+        description="モデル名"
+    )
+    prompt: str = Field(..., description="画像生成プロンプト")
+    config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="画像生成設定（resolution, aspect_ratio等）"
+    )
+
+
 @app.post("/v1/audio/speech/{product}")
 async def audio_speech(
     product: str,
@@ -192,6 +206,96 @@ async def audio_speech(
 
     response = await call_ai_service(product_id=product, payload=request_body, settings=settings, endpoint_type="audio")
     return response
+
+
+@app.post("/v1/images/gemini/{product}")
+async def gemini_image_generation(
+    product: str,
+    payload: GeminiImageRequest,
+    context: AuthContext = Depends(ensure_authenticated),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Gemini 3 Pro Image画像生成エンドポイント
+
+    Args:
+        product: プロダクトID
+        payload: 画像生成リクエスト
+        context: 認証コンテキスト
+        settings: アプリケーション設定
+
+    Returns:
+        {
+            "success": bool,
+            "image": {
+                "format": str,
+                "data": str,  # base64
+                "resolution": str
+            },
+            "error": str  # エラー時
+        }
+    """
+    if context.product_id != product:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Product mismatch")
+
+    # プロダクト設定を取得
+    product_config = settings.product_configs.get(product)
+    if not product_config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product '{product}' not found")
+
+    # Geminiプロバイダーの設定を取得
+    if isinstance(product_config, dict) and "providers" in product_config:
+        gemini_config = product_config["providers"].get("gemini")
+        if not gemini_config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Gemini provider not configured for product '{product}'"
+            )
+        api_key = gemini_config.get("api_key")
+    else:
+        # レガシー形式（OpenAIのみ）の場合はGemini未対応
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Gemini provider not configured for product '{product}'"
+        )
+
+    if not api_key:
+        logger.error(f"Gemini API key not configured for product: {product}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gemini API key not configured"
+        )
+
+    await rate_limiter.check(product_id=product, user_id=context.user_id)
+
+    logger.info(
+        "Gemini Image generation request",
+        extra={
+            "product": product,
+            "user": context.user_id,
+            "method": context.method,
+            "model": payload.model,
+            "prompt_length": len(payload.prompt),
+        },
+    )
+
+    # GeminiImageProviderを使用して画像生成
+    result = await GeminiImageProvider.generate_image(
+        api_key=api_key,
+        prompt=payload.prompt,
+        config=payload.config
+    )
+
+    if not result.get("success"):
+        error_msg = result.get("error", "Unknown error")
+        logger.error(f"Gemini image generation failed: {error_msg}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=error_msg
+        )
+
+    logger.info("Gemini image generation successful")
+    return result
 
 
 def create_app() -> FastAPI:
