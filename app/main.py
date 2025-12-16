@@ -244,14 +244,15 @@ async def gemini_image_generation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product '{product}' not found")
 
     # Geminiプロバイダーの設定を取得
-    if isinstance(product_config, dict) and "providers" in product_config:
-        gemini_config = product_config["providers"].get("gemini")
+    if hasattr(product_config, 'providers'):
+        # 新形式（ProductConfigクラス）
+        gemini_config = product_config.providers.get("gemini")
         if not gemini_config:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Gemini provider not configured for product '{product}'"
             )
-        api_key = gemini_config.get("api_key")
+        api_key = gemini_config.api_key
     else:
         # レガシー形式（OpenAIのみ）の場合はGemini未対応
         raise HTTPException(
