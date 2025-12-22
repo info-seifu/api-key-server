@@ -42,7 +42,12 @@ class RateLimitConfig(BaseModel):
 class Settings(BaseSettings):
     app_name: str = "api-key-server"
     allowed_models: List[str] = Field(default_factory=lambda: ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"])
-    max_tokens: int = 2048
+    max_tokens: int = Field(
+        default=8192,
+        ge=1,
+        le=200000,
+        description="Maximum tokens for completion. Can be overridden by API_KEY_SERVER_MAX_TOKENS environment variable."
+    )
     min_temperature: float = 0.0
     max_temperature: float = 1.0
     jwt_audience: str = "api-key-server"
