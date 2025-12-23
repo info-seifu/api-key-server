@@ -112,6 +112,8 @@ async def verify_hmac(
     if not product_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing product in path")
 
+    logger.info(f"HMAC authentication successful for client: {client_id}")
+
     return AuthContext(user_id=client_id, product_id=str(product_id), method="hmac", client_id=client_id)
 
 
