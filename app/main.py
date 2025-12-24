@@ -33,15 +33,20 @@ class ChatRequest(BaseModel):
     stream: bool = Field(default=False, description="Enable streaming response")
 
     @validator("max_tokens")
-    def validate_max_tokens(cls, value: Optional[int]) -> Optional[int]:
-        if value is not None:
-            if value < 1:
-                raise ValueError("max_tokens must be >= 1")
-            if value > settings.max_tokens:
-                raise ValueError(
-                    f"max_tokens must be <= {settings.max_tokens}. "
-                    f"To increase this limit, set API_KEY_SERVER_MAX_TOKENS environment variable."
-                )
+    def validate_max_tokens(cls, value: Optional[int]) -> int:
+        """max_tokensのバリデーションとデフォルト値適用"""
+        # クライアントが指定しない場合はサーバーのデフォルト値を適用
+        if value is None:
+            return settings.max_tokens
+
+        # 指定された場合はバリデーション
+        if value < 1:
+            raise ValueError("max_tokens must be >= 1")
+        if value > settings.max_tokens:
+            raise ValueError(
+                f"max_tokens must be <= {settings.max_tokens}. "
+                f"To increase this limit, set API_KEY_SERVER_MAX_TOKENS environment variable."
+            )
         return value
 
     @validator("temperature")
