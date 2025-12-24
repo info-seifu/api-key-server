@@ -795,14 +795,70 @@ docker build -t gcr.io/your-project-id/api-key-server:latest .
 # イメージプッシュ
 docker push gcr.io/your-project-id/api-key-server:latest
 
-# Cloud Runデプロイ
+# Cloud Runデプロイ（初回）
 gcloud run deploy api-key-server \
   --image gcr.io/your-project-id/api-key-server:latest \
   --platform managed \
   --region asia-northeast1 \
   --allow-unauthenticated \
-  --set-env-vars USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=your-project-id
+  --set-env-vars USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=your-project-id,API_KEY_SERVER_MAX_TOKENS=8192
 ```
+
+**⚠️ 重要：環境変数の管理ルール（変数削除を防ぐ）**
+
+`--set-env-vars` オプションは**既存の環境変数を完全に上書き**します。新しい変数を追加する際に既存の変数が削除されることを防ぐため、以下のルールを厳守してください。
+
+**gcloud コマンドの環境変数オプション**:
+
+| オプション | 動作 | 使用場面 |
+|-----------|------|----------|
+| `--set-env-vars=A=1,B=2` | **すべての既存変数を削除**して、A=1, B=2 のみ設定 | 環境変数を完全に置き換える時 |
+| `--update-env-vars=C=3` | 既存変数を保持して、C=3 を追加または更新 | **新しい変数を追加する時（推奨）** |
+| `--remove-env-vars=D` | 指定した変数Dのみを削除、他は保持 | 特定の変数を削除する時 |
+| `--clear-env-vars` | すべての環境変数を削除 | 環境変数をクリアする時 |
+
+**環境変数を追加・変更する正しい手順**:
+
+1. **現在の環境変数を確認**:
+   ```bash
+   gcloud run services describe api-key-server \
+     --region=asia-northeast1 \
+     --format="yaml(spec.template.spec.containers[0].env)" \
+     --project=interview-api-472500
+   ```
+
+2. **`--update-env-vars` で追加（推奨）**:
+   ```bash
+   # 既存の変数を保持したまま、新しい変数を追加または更新
+   gcloud run services update api-key-server \
+     --region=asia-northeast1 \
+     --update-env-vars API_KEY_SERVER_MAX_TOKENS=8192 \
+     --project=interview-api-472500
+   ```
+
+3. **または、すべての変数を含めて `--set-env-vars`**:
+   ```bash
+   # すべての必須環境変数を明示的に指定
+   gcloud run services update api-key-server \
+     --region=asia-northeast1 \
+     --set-env-vars USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=interview-api-472500,API_KEY_SERVER_MAX_TOKENS=8192 \
+     --project=interview-api-472500
+   ```
+
+**現在の必須環境変数**:
+- `USE_SECRET_MANAGER=true` - Secret Manager有効化
+- `API_KEY_SERVER_GCP_PROJECT_ID=interview-api-472500` - GCPプロジェクトID
+- `API_KEY_SERVER_MAX_TOKENS=8192` - トークン上限（ソースコードのデフォルト値があるため省略可能だが、明示推奨）
+
+**デプロイ前のチェックリスト**:
+- [ ] 現在の環境変数を確認した
+- [ ] `--update-env-vars` を使用するか、すべての必須環境変数を含めた
+- [ ] デプロイ後に環境変数が正しく設定されているか確認した
+
+> AI への指示：
+> 「Cloud Runに環境変数を追加する場合は、必ず `--update-env-vars` を使用してください。
+> `--set-env-vars` を使う場合は、現在の環境変数を確認し、すべての必須環境変数を含めてください。
+> デプロイ後は必ず環境変数が正しく設定されているか確認してください。」
 
 ### 15.3 ログ監視
 
