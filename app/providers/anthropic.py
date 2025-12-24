@@ -89,10 +89,15 @@ class AnthropicProvider:
                     "content": msg["content"]
                 })
 
+        # max_tokensの取得（設定ファイルのデフォルト値を使用）
+        from app.config import get_settings
+
+        config = get_settings()
+
         anthropic_payload = {
             "model": openai_payload.get("model", "claude-3-5-sonnet-20241022"),
             "messages": claude_messages,
-            "max_tokens": openai_payload.get("max_tokens", 2048)
+            "max_tokens": openai_payload.get("max_tokens", config.max_tokens)  # リクエストになければ設定値を使用
         }
 
         if system_message:
