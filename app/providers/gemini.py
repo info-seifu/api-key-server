@@ -92,8 +92,11 @@ class GeminiProvider:
         generation_config = {}
         if "temperature" in openai_payload:
             generation_config["temperature"] = openai_payload["temperature"]
-        if "max_tokens" in openai_payload:
-            generation_config["maxOutputTokens"] = openai_payload["max_tokens"]
+
+        # max_tokensの取得（設定ファイルのデフォルト値を使用）
+        from app.config import get_settings
+        config = get_settings()
+        generation_config["maxOutputTokens"] = openai_payload.get("max_tokens", config.max_tokens)
 
         if generation_config:
             gemini_payload["generationConfig"] = generation_config
@@ -150,7 +153,7 @@ class GeminiProvider:
     @staticmethod
     async def call_image(api_key: str, payload: dict, base_url: str | None = None, timeout: int = 30) -> dict:
         """
-        Call Google Gemini image generation API.
+        Call Google Gemini 3 Pro Image generation API.
 
         Args:
             api_key: Google API key
@@ -163,26 +166,44 @@ class GeminiProvider:
         """
         model = payload.get("model", "gemini-3-pro-image-preview")
         prompt = payload.get("prompt", "")
+        size = payload.get("size", "1024x1024")
 
-        # Build URL - Gemini uses Imagen for image generation
+        # Build URL - Gemini 3 Pro Image uses generateContent endpoint
         if base_url:
             url = base_url
         else:
-            # Use Imagen API endpoint
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImage"
+            # Use Gemini 3 Pro Image API endpoint
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
         url = f"{url}?key={api_key}"
 
-        # Convert OpenAI format to Gemini Imagen format
+        # Map OpenAI size to Gemini imageSize
+        # OpenAI: "1024x1024", "2048x2048", "4096x4096"
+        # Gemini: "1K", "2K", "4K"
+        size_map = {
+            "1024x1024": "1K",
+            "2048x2048": "2K",
+            "4096x4096": "4K"
+        }
+        image_size = size_map.get(size, "2K")
+
+        # Determine aspect ratio from size
+        # For square images, use 1:1
+        aspect_ratio = "1:1"
+
+        # Convert OpenAI format to Gemini 3 Pro Image format
         gemini_payload = {
-            "prompt": {
-                "text": prompt
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {
+                    "aspectRatio": aspect_ratio,
+                    "imageSize": image_size
+                }
             }
         }
-
-        # Add optional parameters
-        if "n" in payload:
-            gemini_payload["sampleCount"] = payload["n"]
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -213,7 +234,14 @@ class GeminiProvider:
 
         # Convert Gemini response to OpenAI format
         gemini_response = response.json()
-        images = gemini_response.get("generatedImages", [])
+
+        # Gemini 3 Pro Image returns candidates with inlineData
+        candidates = gemini_response.get("candidates", [])
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No candidates in Gemini response"
+            )
 
         # Build OpenAI-compatible response
         openai_response = {
@@ -221,13 +249,23 @@ class GeminiProvider:
             "data": []
         }
 
-        for img in images:
-            # Gemini returns base64 encoded images
-            image_data = img.get("image", "")
-            openai_response["data"].append({
-                "b64_json": image_data if payload.get("response_format") == "b64_json" else None,
-                "url": f"data:image/png;base64,{image_data}" if payload.get("response_format") != "b64_json" else None
-            })
+        # Extract images from candidates
+        for candidate in candidates:
+            content = candidate.get("content", {})
+            parts = content.get("parts", [])
+
+            for part in parts:
+                if "inlineData" in part:
+                    inline_data = part["inlineData"]
+                    mime_type = inline_data.get("mimeType", "")
+
+                    # Only process image data
+                    if mime_type.startswith("image/"):
+                        image_data = inline_data.get("data", "")
+                        openai_response["data"].append({
+                            "b64_json": image_data if payload.get("response_format") == "b64_json" else None,
+                            "url": f"data:{mime_type};base64,{image_data}" if payload.get("response_format") != "b64_json" else None
+                        })
 
         return openai_response
 
