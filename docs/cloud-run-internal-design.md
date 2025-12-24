@@ -89,6 +89,110 @@
 - 許可モデルのホワイトリスト化、`max_tokens` 上限、`temperature` 範囲など。
 - リクエストサイズ/回数の制限、ストリーミング時間上限。
 
+### 4.4 タイムアウト設定の方針
+
+本プロキシは **多段階のタイムアウト管理** を避け、シンプルな設計を採用しています。
+
+#### 4.4.1 タイムアウトの階層
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Unified Auth Server (Cloud Run)                     │
+│ - タイムアウト: 300秒（最大値）                      │
+│ - 役割: リクエストを素通し（プロキシ）               │
+│                                                      │
+│   ┌───────────────────────────────────────────┐     │
+│   │ API Proxy Server へリクエスト転送          │     │
+│   └───────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────┐
+│ API Proxy Server (Cloud Run)                        │
+│ - Cloud Run タイムアウト: 300秒                      │
+│ - HTTPリクエストタイムアウト: 180秒                  │
+│   (環境変数: API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS)│
+│                                                      │
+│   ┌───────────────────────────────────────────┐     │
+│   │ 外部API (Claude/Gemini/OpenAI) 呼び出し   │     │
+│   │ ← ここで実際のタイムアウト制御             │     │
+│   └───────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────┘
+                    ↓
+         外部AI API (処理時間は可変)
+```
+
+#### 4.4.2 設定値と役割
+
+| 設定項目 | 値 | 役割 | 設定方法 |
+|---------|-----|------|---------|
+| **Unified Auth Server - Cloud Run タイムアウト** | 300秒 | リクエスト全体の最大時間（素通し用に最大値を設定） | `--timeout=300` |
+| **API Proxy Server - Cloud Run タイムアウト** | 300秒 | コンテナ全体の最大実行時間 | `--timeout=300` |
+| **API Proxy Server - HTTPリクエストタイムアウト** | 180秒 | 外部API呼び出しの実際の時間制限 | `--update-env-vars API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=180` |
+
+#### 4.4.3 設計方針
+
+**原則**: タイムアウト制御は **API Proxy Server の HTTPリクエストタイムアウト** で一元管理する
+
+- **Unified Auth Server**: 認証とプロキシの役割に徹し、タイムアウトは最大値（300秒）に設定
+  - 理由: リクエストを素通しするだけなので、独自のタイムアウト制御は不要
+  - メリット: タイムアウト設定の二重管理を避け、保守性を向上
+
+- **API Proxy Server**: 外部API呼び出しの実際の時間制限を管理
+  - `API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS`: 外部API（Claude/Gemini/OpenAI）への実際の時間制限
+  - デフォルト: 180秒（大規模なテキスト生成に対応）
+  - 調整: 処理内容に応じて環境変数で変更可能
+
+**階層的な制約**:
+```
+API Proxy HTTPリクエストタイムアウト (180秒)
+  < API Proxy Cloud Run タイムアウト (300秒)
+  ≤ Unified Auth Server Cloud Run タイムアウト (300秒)
+```
+
+#### 4.4.4 設定コマンド例
+
+**Unified Auth Server（素通し用に最大値）**:
+```bash
+gcloud run services update unified-auth-server \
+  --timeout=300 \
+  --region asia-northeast1 \
+  --project <project-id>
+```
+
+**API Proxy Server（実際の制御）**:
+```bash
+# Cloud Run タイムアウト（最大値）
+gcloud run deploy api-key-server \
+  --timeout=300 \
+  --region asia-northeast1
+
+# HTTPリクエストタイムアウト（実際の制御）
+gcloud run services update api-key-server \
+  --update-env-vars API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=180 \
+  --region asia-northeast1
+```
+
+#### 4.4.5 トラブルシューティング
+
+**症状**: `504 Gateway Timeout` エラー
+
+**原因の切り分け**:
+1. **Unified Auth Serverでタイムアウト** → ログに60秒前後のレイテンシーが記録される
+2. **API Proxy ServerのHTTPタイムアウト** → ログに180秒前後のレイテンシーが記録される
+3. **Cloud Runタイムアウト** → ログに300秒前後のレイテンシーが記録される
+
+**対処方法**:
+- Unified Auth Serverでタイムアウトが発生する場合: 設計エラー（本来発生しない）
+- API Proxy ServerのHTTPタイムアウトが不足: `API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS`を増やす
+- 外部APIの処理時間が想定外に長い: リクエスト内容の見直しまたはタイムアウト値の調整
+
+#### 4.4.6 変更履歴
+
+- 2025-12-23: タイムアウト設定方針を追加
+  - Unified Auth Server: 60秒 → 300秒（素通し用に最大値）
+  - API Proxy Server HTTPタイムアウト: 90秒 → 180秒（大規模テキスト生成対応）
+  - 一元管理の方針を明確化
+
 ### 4.4 Secrets 管理
 
 #### 4.4.1 Secret Manager の使用（推奨）
