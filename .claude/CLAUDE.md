@@ -860,6 +860,37 @@ gcloud run deploy api-key-server \
 > `--set-env-vars` を使う場合は、現在の環境変数を確認し、すべての必須環境変数を含めてください。
 > デプロイ後は必ず環境変数が正しく設定されているか確認してください。」
 
+**⚠️ デプロイ時の重要な注意事項**:
+
+Cloud Runへのデプロイを行う際は、**必ず README.md に記載された正式なデプロイコマンドを使用してください**。
+
+README.md の「Deploy to Cloud Run」セクション（Step 3）には、すべての必須環境変数を含む正しいコマンドが記載されています：
+
+```bash
+gcloud run deploy api-key-server \
+  --image gcr.io/${PROJECT_ID}/api-key-server \
+  --region asia-northeast1 \
+  --set-env-vars "USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=${PROJECT_ID},API_KEY_SERVER_MAX_TOKENS=8192,API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=240" \
+  --timeout=300 \
+  --allow-unauthenticated=false
+```
+
+**誤ったデプロイの例（絶対に避けてください）**:
+```bash
+# ❌ 悪い例：一部の環境変数のみ指定
+gcloud run deploy api-key-server \
+  --set-env-vars "USE_SECRET_MANAGER=true"  # 他の変数が削除される！
+```
+
+このような不完全なコマンドを実行すると、`API_KEY_SERVER_GCP_PROJECT_ID`、`API_KEY_SERVER_MAX_TOKENS`、`API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS` などの重要な環境変数が削除され、サービスが正常に動作しなくなります。
+
+**推奨手順**:
+1. README.md の該当セクションを確認
+2. コマンドをコピーして変数（`${PROJECT_ID}`など）を置換
+3. すべての必須環境変数が含まれていることを確認
+4. デプロイ実行
+5. デプロイ後に環境変数が正しく設定されているか確認
+
 ### 15.3 ログ監視
 
 **Cloud Logging クエリ**:

@@ -248,6 +248,22 @@ For production deployments, it's recommended to use Google Cloud Secret Manager 
 - If environment variables (`API_KEY_SERVER_PRODUCT_KEYS`, etc.) are not set, it fetches from Secret Manager
 - Environment variables take precedence over Secret Manager (useful for local development)
 
+### Required Environment Variables for Cloud Run Deployment
+
+以下の環境変数は Cloud Run デプロイ時に必須です。**`--set-env-vars`は既存の環境変数をクリアする**ため、再デプロイ時はすべての必要な変数を含めてください。
+
+| 変数名 | 必須 | デフォルト値 | 説明 |
+|--------|------|-------------|------|
+| `USE_SECRET_MANAGER` | ○ | - | Secret Manager使用フラグ (`true`で有効化) |
+| `API_KEY_SERVER_GCP_PROJECT_ID` | ○ | - | GCPプロジェクトID（Secret Manager接続に使用） |
+| `API_KEY_SERVER_MAX_TOKENS` | - | 8192 | 最大トークン数（1-200000） |
+| `API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS` | - | 90 | APIリクエストタイムアウト（秒）<br>長いレスポンスの場合は240推奨 |
+| `API_KEY_SERVER_SECRET_PRODUCT_KEYS_NAME` | - | openai-api-keys | Product Keys用シークレット名 |
+| `API_KEY_SERVER_SECRET_JWT_KEYS_NAME` | - | jwt-public-keys | JWT公開鍵用シークレット名 |
+| `API_KEY_SERVER_SECRET_HMAC_SECRETS_NAME` | - | hmac-secrets | HMAC秘密鍵用シークレット名 |
+
+**⚠️ 重要**: デプロイ時は必ず README.md に記載されたコマンドを使用してください。`--set-env-vars`で一部の変数のみ指定すると、他の重要な環境変数が削除されます。
+
 Rate limit defaults (per product/user):
 - Bucket capacity: 10 requests
 - Refill: 5 tokens/sec
@@ -369,8 +385,8 @@ gcloud builds submit --tag gcr.io/${PROJECT_ID}/api-key-server
 gcloud run deploy api-key-server \
   --image gcr.io/${PROJECT_ID}/api-key-server \
   --region asia-northeast1 \
-  --set-env-vars "USE_SECRET_MANAGER=true" \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" \
+  --set-env-vars "USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=${PROJECT_ID},API_KEY_SERVER_MAX_TOKENS=8192,API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=240" \
+  --timeout=300 \
   --allow-unauthenticated=false
 ```
 
