@@ -401,31 +401,46 @@ gcloud run deploy api-key-server \
   --allow-unauthenticated=false
 ```
 
-### GitHub からの自動デプロイを設定する場合の例 (Cloud Build トリガー)
+### 自動デプロイの設定（推奨）
 
-#### Option 1: Using Secret Manager (Recommended)
-1. GCP プロジェクトで Cloud Build と Secret Manager を有効化し、GitHub 連携を設定する。
-2. 上記の手順でSecret Managerにシークレットを作成する。
-3. Cloud Build トリガーを作成し、`main` ブランチへの push をトリガー条件にする。
-4. トリガーのビルドステップ例 (`cloudbuild.yaml`):
-   ```yaml
-   steps:
-     - name: 'gcr.io/cloud-builders/gcloud'
-       args: ['builds', 'submit', '--tag', 'gcr.io/$PROJECT_ID/api-key-server']
-     - name: 'gcr.io/cloud-builders/gcloud'
-       args:
-         - 'run'
-         - 'deploy'
-         - 'api-key-server'
-         - '--image'
-         - 'gcr.io/$PROJECT_ID/api-key-server'
-         - '--region'
-         - 'asia-northeast1'
-         - '--set-env-vars'
-         - 'USE_SECRET_MANAGER=true,GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
-         - '--allow-unauthenticated=false'
+**⚠️ 重要**: 環境変数削除のリスクを防ぐため、自動デプロイを強く推奨します。
+
+このリポジトリには `cloudbuild.yaml` が含まれており、すべての必須環境変数が定義されています。
+
+#### 手順:
+
+1. **GCP プロジェクトで Cloud Build を有効化**
+   ```bash
+   gcloud services enable cloudbuild.googleapis.com --project=interview-api-472500
    ```
-5. Cloud Runのサービスアカウントに Secret Manager Secret Accessor 権限が付与されていることを確認する。
+
+2. **GitHub 連携を設定**（初回のみ）
+   - [GCP Console > Cloud Build > トリガー](https://console.cloud.google.com/cloud-build/triggers)
+   - 「トリガーを作成」をクリック
+   - 「リポジトリを選択」で GitHub を選択し、`info-seifu/api-key-server` を接続
+
+3. **Cloud Build トリガーを作成**
+   - **名前**: `api-key-server-deploy`
+   - **イベント**: ブランチにpush
+   - **ソース（リポジトリ）**: `info-seifu/api-key-server`
+   - **ブランチ**: `^main$`
+   - **構成**: Cloud Build 構成ファイル（yaml または json）
+   - **Cloud Build 構成ファイルの場所**: `/cloudbuild.yaml`
+   - 「作成」をクリック
+
+4. **動作確認**
+   - `main` ブランチに何かpushすると、自動的にビルド・デプロイが実行されます
+   - [Cloud Build の履歴](https://console.cloud.google.com/cloud-build/builds)で進捗を確認できます
+
+#### cloudbuild.yaml の内容
+
+このファイルには以下の環境変数が固定されています（手動デプロイ時の削除リスクを防止）：
+- `USE_SECRET_MANAGER=true`
+- `API_KEY_SERVER_GCP_PROJECT_ID=$PROJECT_ID`
+- `API_KEY_SERVER_MAX_TOKENS=8192`
+- `API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=240`
+
+環境変数を変更する場合は、`cloudbuild.yaml` を編集してコミットすることで、変更履歴が Git で管理されます。
 
 #### Option 2: Using Environment Variables (Not Recommended)
 1. GCP プロジェクトで Cloud Build を有効化し、GitHub 連携を設定する。

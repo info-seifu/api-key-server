@@ -1,0 +1,47 @@
+# Git files
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+# Config files (use Secret Manager instead)
+config/*.json
+!config/.gitkeep
+
+# Temporary files
+*.log
+.DS_Store
+tmp/
+temp/
+
+# Claude files
+.claude/
+GEMINI_IMAGE_*.md
