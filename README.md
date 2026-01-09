@@ -1,15 +1,62 @@
 # API Key Proxy Server
 
-A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on the server side, enforces short-lived client authentication (JWT, HMAC, or IAP), applies per-product/user rate limits, and forwards allowed chat completion calls to upstream providers like OpenAI, Gemini, and Anthropic.
+FastAPIベースのAI APIプロキシサーバー。上流APIキー（OpenAI、Gemini、Anthropic）をサーバー側で管理し、クライアント側の認証・レート制限・複数プロバイダ対応を提供します。Google Cloud Runでの運用に最適化されています。
 
-## Features
-- JWT (RS256), HMAC + timestamp, or Google IAP authentication.
-- Multi-provider support: OpenAI, Google Gemini, Anthropic Claude with automatic provider selection based on model name.
-- Per-product/user token-bucket QPS control and a daily quota guard. Redis-backed when available, with in-memory fallback that also enforces daily quotas.
-- Parameter validation for allowed models, `max_tokens`, and temperature range.
-- Upstream request errors are surfaced as 502 responses rather than generic failures.
-- Simple `/healthz` endpoint for Cloud Run health checks.
-- Dockerfile tailored for Cloud Run and configurable via environment variables.
+## 目次
+
+- [主な機能](#主な機能)
+- [技術スタック](#技術スタック)
+- [ディレクトリ構成](#ディレクトリ構成)
+- [クライアント開発者向けガイド](#for-client-developers クライアント開発者向け)
+  - [エンドポイント](#エンドポイント)
+  - [利用可能なモデル](#利用可能なモデル)
+  - [リクエスト・レスポンス形式](#リクエスト形式openai互換)
+  - [認証](#認証)
+  - [サンプルコード](#サンプルコード)
+  - [エラーハンドリング](#エラーハンドリング)
+- [運用手順](#運用手順)
+- [Configuration](#configuration)
+- [ローカル開発環境](#ローカル開発環境)
+- [Deploy to Cloud Run](#deploy-to-cloud-run)
+- [認証とセキュリティ](#認証とセキュリティ)
+- [ドキュメント](#ドキュメント)
+
+## 主な機能
+
+- **認証**: JWT (RS256)、HMAC + タイムスタンプ、Google IAP
+- **マルチプロバイダ対応**: OpenAI、Google Gemini、Anthropic Claude（モデル名による自動選択）
+- **レート制限**: プロダクト/ユーザー単位のトークンバケット方式（Redis対応、日次クォータあり）
+- **パラメータ検証**: 許可されたモデル、`max_tokens`、temperature範囲のチェック
+- **エラーハンドリング**: 上流APIエラーを502レスポンスとして統一（詳細は隠蔽）
+- **ヘルスチェック**: `/healthz` エンドポイント
+- **Cloud Run最適化**: Dockerfileと環境変数による設定
+
+## 技術スタック
+
+| カテゴリ | 技術 |
+|---------|------|
+| 言語 | Python 3.11 |
+| フレームワーク | FastAPI 0.111.0、Pydantic 2.7.4 |
+| HTTP | HTTPX 0.27.0（非同期）、Uvicorn 0.30.1 |
+| 認証 | Python-Jose 3.3.0、Google Auth 2.43.0 |
+| インフラ | Docker、Cloud Run、Secret Manager、Redis（オプション） |
+
+## ディレクトリ構成
+
+```
+app/
+├── main.py          # FastAPIアプリ（エンドポイント定義）
+├── config.py        # 設定管理
+├── auth.py          # 認証処理（JWT/HMAC/IAP）
+├── rate_limit.py    # レート制限
+├── secrets.py       # Secret Manager統合
+├── upstream.py      # プロバイダ委譲
+└── providers/
+    ├── openai.py    # OpenAIプロバイダ
+    ├── gemini.py    # Geminiプロバイダ
+    ├── gemini_image.py  # Gemini画像生成
+    └── anthropic.py # Claudeプロバイダ
+```
 
 ---
 
@@ -21,7 +68,12 @@ A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on th
 
 ```
 ベースURL: https://your-proxy-server.run.app
-チャット補完: POST /chat/{product_id}
+
+チャット補完:     POST /v1/chat/{product}
+画像生成:        POST /v1/images/generations/{product}
+音声生成:        POST /v1/audio/speech/{product}
+Gemini画像生成:  POST /v1/images/gemini/{product}
+ヘルスチェック:   GET /healthz
 ```
 
 ### 利用可能なモデル
@@ -38,7 +90,7 @@ A minimal FastAPI proxy designed for Cloud Run. It keeps upstream API keys on th
 ### リクエスト形式（OpenAI互換）
 
 ```json
-POST /chat/{product_id}
+POST /v1/chat/{product}
 Content-Type: application/json
 
 {
@@ -88,7 +140,7 @@ Content-Type: application/json
 import requests
 
 response = requests.post(
-    "https://your-proxy-server.run.app/chat/product-a",
+    "https://your-proxy-server.run.app/v1/chat/product-a",
     json={
         "model": "gpt-4o",
         "messages": [{"role": "user", "content": "こんにちは"}]
@@ -106,7 +158,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="dummy",  # ダミーでOK（プロキシがAPIキーを管理）
-    base_url="https://your-proxy-server.run.app/chat/product-a"
+    base_url="https://your-proxy-server.run.app/v1"
 )
 
 response = client.chat.completions.create(
@@ -121,7 +173,7 @@ print(response.choices[0].message.content)
 
 ```javascript
 const response = await fetch(
-  "https://your-proxy-server.run.app/chat/product-a",
+  "https://your-proxy-server.run.app/v1/chat/product-a",
   {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -153,6 +205,12 @@ console.log(result.choices[0].message.content);
 - ⚠️ **APIキーをクライアント側に保存しないでください**。セキュリティリスクがあります。
 - ✅ モデル名を変更するだけで、異なるプロバイダー（OpenAI/Gemini/Anthropic）を使い分けられます。
 - ✅ すべてのレスポンスはOpenAI互換形式で返されます。
+
+---
+
+## 運用手順
+
+ローカル開発、CI/CD設定、本番デプロイ、Secret Managerメンテナンス、ログ監視、トラブルシューティングなどの詳細は **[docs/OPERATIONS.md](docs/OPERATIONS.md)** を参照してください。
 
 ---
 
@@ -264,20 +322,37 @@ For production deployments, it's recommended to use Google Cloud Secret Manager 
 
 **⚠️ 重要**: デプロイ時は必ず README.md に記載されたコマンドを使用してください。`--set-env-vars`で一部の変数のみ指定すると、他の重要な環境変数が削除されます。
 
-Rate limit defaults (per product/user):
-- Bucket capacity: 10 requests
-- Refill: 5 tokens/sec
-- Daily quota: 200,000 requests
+**レート制限のデフォルト値（プロダクト/ユーザー単位）:**
+- バケット容量: 10リクエスト
+- 補充レート: 5 tokens/sec
+- 日次クォータ: 200,000リクエスト
 
-## Run locally
+---
+
+## ローカル開発環境
+
+基本的なセットアップ:
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8080
+
+# 環境変数設定
+export USE_SECRET_MANAGER=false
+export API_KEY_SERVER_MAX_TOKENS=8192
+
+# サーバー起動
+uvicorn app.main:app --reload --port 8000
 ```
 
+詳細なセットアップ手順は [docs/OPERATIONS.md](docs/OPERATIONS.md) を参照してください。
+
+---
+
 ## Deploy to Cloud Run
+
+以下は基本的なデプロイ手順です。詳細な手順やトラブルシューティングは [docs/OPERATIONS.md](docs/OPERATIONS.md) を参照してください。
 
 ### Option 1: Using Secret Manager (Recommended)
 
@@ -468,9 +543,41 @@ gcloud run deploy api-key-server \
 4. 環境変数は Cloud Build トリガーの **シークレット/変数設定** で管理し、上記の `--set-env-vars` に差し込む（JSON を含むため引用符のエスケープに注意）。
 5. 必要に応じて `API_KEY_SERVER_ALLOWED_MODELS` や Redis 設定なども `--set-env-vars` で追加する。
 
-See `docs/cloud-run-internal-design.md` for the security architecture that guided this implementation.
+---
 
-## Google Workspace 認証フローとの関係
-- このサーバーは **すでに認証済みのクライアント** からのリクエストを前提にしており、Google Workspace/IAP でのログインやドメインチェックそのものは実装していません。Workspace 認証を使う場合は、IAP や Identity-Aware Proxy の前段でログインを完了させた上で、このサーバーに到達するリクエストに JWT または HMAC ヘッダーを付与してください。
-- 上流 API キーは `API_KEY_SERVER_PRODUCT_KEYS` でコンテナ起動時に注入し、リクエスト転送時にヘッダーへ設定するだけなので **ファイル保存は行わずメモリ上でのみ使用** されます。
-- クライアントへ直接 API キーを返すエンドポイントを設ける方法と比べると、本プロキシ方式はキーの配布・漏洩リスクを減らし、レートリミットやプロダクト単位のポリシーを一元化できるため、社内限定環境ではプロキシ経由を推奨します。
+## 認証とセキュリティ
+
+### Google Workspace 認証フローとの関係
+
+このサーバーは **すでに認証済みのクライアント** からのリクエストを前提としており、Google Workspace/IAP でのログインやドメインチェックそのものは実装していません。
+
+**認証方式:**
+- **IAP使用時**: Identity-Aware Proxyの前段でログインを完了させ、リクエストに `X-Goog-IAP-JWT-Assertion` ヘッダーが付与されます
+- **JWT認証**: クライアントが `Authorization: Bearer <token>` ヘッダーを付与します
+- **HMAC認証**: クライアントが `X-Timestamp`、`X-Signature`、`X-Client-ID` ヘッダーを付与します
+
+### セキュリティ設計
+
+- **APIキーの管理**: 上流APIキーはメモリ上でのみ使用され、ファイル保存は行いません
+- **キー漏洩対策**: クライアントへ直接APIキーを返すエンドポイントは提供しません
+- **一元管理**: レートリミットやプロダクト単位のポリシーを一元化
+- **エラー隠蔽**: 上流APIエラーの詳細は502レスポンスとして統一し、詳細情報を漏らしません
+
+詳細なセキュリティアーキテクチャは `docs/cloud-run-internal-design.md` を参照してください。
+
+---
+
+## ドキュメント
+
+| ドキュメント | 内容 |
+|------------|------|
+| [README.md](README.md) | プロジェクト概要、クライアント開発者向けガイド、設定方法 |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 運用手順（ローカル開発、CI/CD、デプロイ、トラブルシューティング） |
+| [.claude/CLAUDE.md](.claude/CLAUDE.md) | プロジェクト固有のAI開発ルール |
+| docs/cloud-run-internal-design.md | セキュリティアーキテクチャ設計書 |
+
+---
+
+## ライセンス
+
+このプロジェクトのライセンスについては、プロジェクト管理者に問い合わせてください。
