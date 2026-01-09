@@ -39,9 +39,10 @@ class OpenAIProvider:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
+            logger.error(f"OpenAI API request failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"OpenAI API request failed: {str(exc)}"
+                detail="Upstream service unavailable"
             )
 
         if response.status_code >= 500:
@@ -95,9 +96,10 @@ class OpenAIProvider:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
+            logger.error(f"OpenAI image API request failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"OpenAI API request failed: {str(exc)}"
+                detail="Upstream service unavailable"
             )
 
         if response.status_code >= 500:
@@ -152,9 +154,10 @@ class OpenAIProvider:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, json=payload)
         except httpx.RequestError as exc:
+            logger.error(f"OpenAI audio API request failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"OpenAI API request failed: {str(exc)}"
+                detail="Upstream service unavailable"
             )
 
         if response.status_code >= 500:

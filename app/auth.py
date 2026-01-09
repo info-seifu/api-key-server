@@ -199,7 +199,7 @@ def verify_iap_jwt(iap_jwt: str, request: Request, settings: Settings) -> AuthCo
         logger.error(f"IAP JWT verification failed: {exc}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid IAP token: {str(exc)}"
+            detail="Invalid IAP token"
         )
 
 

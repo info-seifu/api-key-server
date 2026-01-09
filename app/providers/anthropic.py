@@ -44,9 +44,10 @@ class AnthropicProvider:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, json=anthropic_payload)
         except httpx.RequestError as exc:
+            logger.error(f"Anthropic API request failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Anthropic API request failed: {str(exc)}"
+                detail="Upstream service unavailable"
             )
 
         if response.status_code >= 500:
