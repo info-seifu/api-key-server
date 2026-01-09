@@ -15,10 +15,9 @@ steps:
       - 'api-key-server'
       - '--image=gcr.io/$PROJECT_ID/api-key-server'
       - '--region=asia-northeast1'
-      - '--platform=managed'
       - '--set-env-vars=USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=$PROJECT_ID,API_KEY_SERVER_MAX_TOKENS=8192,API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=240'
       - '--timeout=300'
-      - '--allow-unauthenticated=false'
+      - '--no-allow-unauthenticated'
 
 images:
   - 'gcr.io/$PROJECT_ID/api-key-server'
