@@ -16,7 +16,8 @@ steps:
       - '--image=gcr.io/$PROJECT_ID/api-key-server'
       - '--region=asia-northeast1'
       - '--set-env-vars=USE_SECRET_MANAGER=true,API_KEY_SERVER_GCP_PROJECT_ID=$PROJECT_ID,API_KEY_SERVER_MAX_TOKENS=8192,API_KEY_SERVER_REQUEST_TIMEOUT_SECONDS=240'
-      - '--timeout=300'
+      # タイムアウト設定: 外部APIへのリクエストを含む全体の処理時間
+      - '--timeout=300s'
       - '--no-allow-unauthenticated'
 
 images:
