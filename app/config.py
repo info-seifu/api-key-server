@@ -14,11 +14,29 @@ from .secrets import load_secret_as_dict, should_use_secret_manager
 logger = logging.getLogger("api-key-server.config")
 
 
+# 新形式: 分離設定用モデルクラス
+class ProviderApiKey(BaseModel):
+    """APIキー設定（プロバイダ単位）"""
+    api_key: str
+    base_url: Optional[str] = None
+
+
+class ProviderModelConfig(BaseModel):
+    """モデル設定（APIキーなし）"""
+    models: List[str] = Field(default_factory=list)
+
+
+class ProductModelConfig(BaseModel):
+    """プロダクトのモデル設定（APIキーなし）"""
+    providers: Dict[str, ProviderModelConfig] = Field(default_factory=dict)
+
+
+# 既存形式: 一体型設定用モデルクラス（後方互換性）
 class ProviderConfig(BaseModel):
     """Configuration for a single AI provider."""
-    api_key: str
+    api_key: Optional[str] = None  # Optional for new separated format
     models: List[str] = Field(default_factory=list)
-    base_url: Optional[str] = None  # Optional custom endpoint
+    base_url: Optional[str] = None
 
 
 class ProductConfig(BaseModel):
@@ -31,6 +49,26 @@ class ProductConfig(BaseModel):
             if not provider_config.models or model in provider_config.models:
                 return (provider_name, provider_config)
         return None
+
+    @classmethod
+    def from_separated_configs(
+        cls,
+        model_config: ProductModelConfig,
+        api_keys: Dict[str, ProviderApiKey]
+    ) -> "ProductConfig":
+        """Create ProductConfig by merging model config and API keys."""
+        providers = {}
+        for provider_name, provider_model_config in model_config.providers.items():
+            if provider_name in api_keys:
+                api_key_config = api_keys[provider_name]
+                providers[provider_name] = ProviderConfig(
+                    api_key=api_key_config.api_key,
+                    models=provider_model_config.models,
+                    base_url=api_key_config.base_url
+                )
+            else:
+                logger.warning(f"API key not found for provider: {provider_name}")
+        return cls(providers=providers)
 
 
 class RateLimitConfig(BaseModel):
@@ -58,8 +96,12 @@ class Settings(BaseSettings):
     # Legacy configuration (backward compatibility)
     product_keys: Dict[str, str] = Field(default_factory=dict)
 
-    # New multi-provider configuration
+    # New multi-provider configuration (unified format)
     product_configs: Dict[str, ProductConfig] = Field(default_factory=dict)
+
+    # New separated configuration (models and API keys separated)
+    provider_api_keys: Dict[str, ProviderApiKey] = Field(default_factory=dict)
+    product_model_configs: Dict[str, ProductModelConfig] = Field(default_factory=dict)
 
     jwt_public_keys: Dict[str, str] = Field(default_factory=dict)
     client_hmac_secrets: Dict[str, str] = Field(default_factory=dict)
@@ -74,19 +116,46 @@ class Settings(BaseSettings):
     secret_product_keys_name: str = "openai-api-keys"
     secret_jwt_keys_name: str = "jwt-public-keys"
     secret_hmac_secrets_name: str = "hmac-secrets"
+    secret_provider_api_keys_name: str = "provider-api-keys"
+
+    # Configuration file paths (for local development)
+    product_models_file: str = "config/product-models.json"
+    api_keys_file: str = "config/api-keys.json"
 
     class Config:
         env_prefix = "API_KEY_SERVER_"
         env_file = ".env"
 
+    def get_merged_product_configs(self) -> Dict[str, ProductConfig]:
+        """
+        Get product configs by merging separated configurations.
+        Falls back to existing product_configs if separated configs not available.
+        """
+        # If new separated format is available, use it
+        if self.product_model_configs and self.provider_api_keys:
+            logger.debug("Using separated model configs and API keys")
+            merged = {}
+            for product_id, model_config in self.product_model_configs.items():
+                merged[product_id] = ProductConfig.from_separated_configs(
+                    model_config,
+                    self.provider_api_keys
+                )
+            return merged
+
+        # Fallback to existing unified format
+        return self.product_configs
+
     def get_allowed_models_for_product(self, product_id: str) -> List[str]:
-        """Get all allowed models for a given product from product_configs."""
-        if product_id in self.product_configs:
-            config = self.product_configs[product_id]
+        """Get all allowed models for a given product."""
+        # Try merged configs first (includes both separated and unified formats)
+        merged_configs = self.get_merged_product_configs()
+        if product_id in merged_configs:
+            config = merged_configs[product_id]
             models = []
             for provider_config in config.providers.values():
                 models.extend(provider_config.models)
             return models
+
         # Fallback to legacy product_keys (single provider)
         if product_id in self.product_keys:
             return self.allowed_models
@@ -164,6 +233,73 @@ class Settings(BaseSettings):
                 logger.error(f"Failed to load client_hmac_secrets from Secret Manager: {e}")
                 raise
         return cls._parse_dict_field(value)
+
+    @validator("provider_api_keys", pre=True)
+    def _parse_provider_api_keys(cls, value: object) -> Dict[str, ProviderApiKey]:
+        """Load provider API keys from Secret Manager or local file."""
+        if should_use_secret_manager() and not value:
+            logger.info("Loading provider_api_keys from Secret Manager")
+            project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+            secret_name = os.environ.get(
+                "API_KEY_SERVER_SECRET_PROVIDER_API_KEYS_NAME",
+                "provider-api-keys"
+            )
+            try:
+                raw_data = load_secret_as_dict(secret_name, project_id)
+                return {k: ProviderApiKey(**v) for k, v in raw_data.items()}
+            except Exception as e:
+                logger.info(f"provider-api-keys not found in Secret Manager: {e}")
+                return {}
+
+        # Local file fallback
+        if not value:
+            api_keys_file = os.environ.get("API_KEY_SERVER_API_KEYS_FILE", "config/api-keys.json")
+            if os.path.exists(api_keys_file):
+                logger.info(f"Loading provider_api_keys from file: {api_keys_file}")
+                with open(api_keys_file, "r", encoding="utf-8") as f:
+                    raw_data = json.load(f)
+                return {k: ProviderApiKey(**v) for k, v in raw_data.items()}
+            return {}
+
+        if isinstance(value, dict):
+            return {k: ProviderApiKey(**v) if isinstance(v, dict) else v for k, v in value.items()}
+        if isinstance(value, str) and value.strip():
+            raw_data = json.loads(value)
+            return {k: ProviderApiKey(**v) for k, v in raw_data.items()}
+        return {}
+
+    @validator("product_model_configs", pre=True)
+    def _parse_product_model_configs(cls, value: object) -> Dict[str, ProductModelConfig]:
+        """Load product model configs from file."""
+        if not value:
+            # Try loading from local file first
+            models_file = os.environ.get("API_KEY_SERVER_PRODUCT_MODELS_FILE", "config/product-models.json")
+            if os.path.exists(models_file):
+                logger.info(f"Loading product_model_configs from file: {models_file}")
+                with open(models_file, "r", encoding="utf-8") as f:
+                    raw_data = json.load(f)
+                return {k: ProductModelConfig(**v) for k, v in raw_data.items()}
+
+            # Optionally check Secret Manager
+            if should_use_secret_manager():
+                project_id = os.environ.get("API_KEY_SERVER_GCP_PROJECT_ID")
+                secret_name = os.environ.get(
+                    "API_KEY_SERVER_SECRET_PRODUCT_MODELS_NAME",
+                    "product-models"
+                )
+                try:
+                    raw_data = load_secret_as_dict(secret_name, project_id)
+                    return {k: ProductModelConfig(**v) for k, v in raw_data.items()}
+                except Exception:
+                    logger.info("product-models not found in Secret Manager")
+            return {}
+
+        if isinstance(value, dict):
+            return {k: ProductModelConfig(**v) if isinstance(v, dict) else v for k, v in value.items()}
+        if isinstance(value, str) and value.strip():
+            raw_data = json.loads(value)
+            return {k: ProductModelConfig(**v) for k, v in raw_data.items()}
+        return {}
 
     @staticmethod
     def _parse_dict_field(value: object) -> Dict[str, str]:

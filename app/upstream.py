@@ -33,9 +33,12 @@ async def call_ai_service(product_id: str, payload: dict, settings: Settings, en
     """
     model = payload.get("model")
 
+    # Get merged product configs (supports both separated and unified formats)
+    merged_configs = settings.get_merged_product_configs()
+
     # Check new multi-provider format first
-    if product_id in settings.product_configs:
-        product_config = settings.product_configs[product_id]
+    if product_id in merged_configs:
+        product_config = merged_configs[product_id]
 
         # Find provider for the requested model
         provider_info = product_config.get_provider_for_model(model)
@@ -52,6 +55,13 @@ async def call_ai_service(product_id: str, payload: dict, settings: Settings, en
             raise HTTPException(
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
                 detail=f"Provider '{provider_name}' not implemented"
+            )
+
+        if not provider_config.api_key:
+            logger.error(f"API key not configured for provider '{provider_name}' in product '{product_id}'")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"API key not configured for provider '{provider_name}'"
             )
 
         provider_class = PROVIDERS[provider_name]
