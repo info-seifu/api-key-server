@@ -181,3 +181,91 @@ class OpenAIProvider:
         # For audio, return binary content with proper content type
         content_type = response.headers.get("content-type", "audio/mpeg")
         return Response(content=response.content, media_type=content_type)
+
+    @staticmethod
+    async def call_transcribe(
+        api_key: str,
+        file_content: bytes,
+        filename: str,
+        model: str = "whisper-1",
+        language: str | None = None,
+        prompt: str | None = None,
+        response_format: str = "json",
+        temperature: float = 0,
+        base_url: str | None = None,
+        timeout: int = 120
+    ) -> dict:
+        """
+        Call OpenAI audio transcription API (Whisper).
+
+        Args:
+            api_key: OpenAI API key
+            file_content: Audio file content (bytes)
+            filename: Original filename
+            model: Model to use (whisper-1)
+            language: ISO-639-1 language code (optional)
+            prompt: Optional text to guide transcription
+            response_format: Response format (json, text, verbose_json)
+            temperature: Sampling temperature (0-1)
+            base_url: Custom endpoint URL (optional)
+            timeout: Request timeout in seconds
+
+        Returns:
+            Transcription result (OpenAI format)
+        """
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        if base_url and "audio/transcriptions" not in base_url:
+            url = base_url.rstrip("/") + "/audio/transcriptions"
+        elif base_url:
+            url = base_url
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        # Build multipart form data
+        files = {
+            "file": (filename, file_content),
+        }
+        data = {
+            "model": model,
+            "response_format": response_format,
+            "temperature": str(temperature),
+        }
+        if language:
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, files=files, data=data)
+        except httpx.RequestError as exc:
+            logger.error(f"OpenAI transcription API request failed: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Upstream service unavailable"
+            )
+
+        if response.status_code >= 500:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OpenAI service error"
+            )
+        if response.status_code == 401:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OpenAI authentication failed"
+            )
+        if response.status_code >= 400:
+            logger.warning(f"OpenAI transcription API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid request parameters"
+            )
+
+        # response_format が "text" の場合は {"text": ...} 形式に変換
+        if response_format == "text":
+            return {"text": response.text}
+
+        return response.json()
