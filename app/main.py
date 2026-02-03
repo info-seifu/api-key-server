@@ -409,7 +409,7 @@ async def audio_transcriptions(
             "method": context.method,
             "model": model,
             "file_size": len(file_content),
-            "filename": file.filename,
+            "audio_filename": file.filename,
         },
     )
 
