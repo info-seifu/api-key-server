@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field, validator
 
-from .auth import AuthContext, ensure_authenticated
+from .auth import AuthContext, ensure_authenticated, verify_hmac_multipart
 from .config import Settings, get_settings
 from .providers.gemini_image import GeminiImageProvider
 from .rate_limit import RateLimiter
@@ -308,6 +308,129 @@ async def gemini_image_generation(
 
     logger.info("Gemini image generation successful")
     return result
+
+
+# 音声ファイルサイズ制限（25MB - OpenAI Whisper と同じ）
+MAX_AUDIO_FILE_SIZE = 25 * 1024 * 1024
+
+# 許可される音声フォーマット
+ALLOWED_AUDIO_FORMATS = {
+    "audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a",
+    "audio/wav", "audio/x-wav", "audio/webm", "audio/ogg",
+    "video/mp4", "video/webm",  # 動画ファイルも音声抽出可能
+}
+
+
+@app.post("/v1/audio/transcriptions/{product}")
+async def audio_transcriptions(
+    product: str,
+    file: UploadFile = File(..., description="Audio file to transcribe"),
+    model: str = Form(default="whisper-1", description="Model to use"),
+    language: Optional[str] = Form(default=None, description="ISO-639-1 language code"),
+    prompt: Optional[str] = Form(default=None, description="Optional text to guide transcription"),
+    response_format: Optional[str] = Form(default="json", description="Response format"),
+    temperature: Optional[float] = Form(default=0, description="Sampling temperature"),
+    x_timestamp: Optional[str] = Header(default=None, alias="X-Timestamp"),
+    x_signature: Optional[str] = Header(default=None, alias="X-Signature"),
+    x_client_id: Optional[str] = Header(default=None, alias="X-Client-Id"),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Audio transcription endpoint (OpenAI Whisper compatible).
+
+    Transcribes audio file to text using OpenAI Whisper API.
+    Supports HMAC authentication for multipart/form-data requests.
+    """
+    # HMAC authentication (multipart 専用)
+    if not (x_timestamp and x_signature and x_client_id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="HMAC authentication required (X-Timestamp, X-Signature, X-Client-Id)"
+        )
+
+    # Build form fields for HMAC verification (file を除く)
+    form_fields = {"model": model}
+    if language:
+        form_fields["language"] = language
+    if prompt:
+        form_fields["prompt"] = prompt
+    if response_format:
+        form_fields["response_format"] = response_format
+    if temperature is not None:
+        form_fields["temperature"] = temperature
+
+    context = await verify_hmac_multipart(
+        client_id=x_client_id,
+        timestamp=x_timestamp,
+        signature=x_signature,
+        product_id=product,
+        method="POST",
+        path=f"/v1/audio/transcriptions/{product}",
+        form_fields=form_fields,
+        settings=settings,
+    )
+
+    if context.product_id != product:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Product mismatch")
+
+    # Validate model is allowed for this product
+    allowed_models = settings.get_allowed_models_for_product(product)
+    if not allowed_models:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Product '{product}' not found")
+    if model not in allowed_models:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model '{model}' is not allowed for product '{product}'. Allowed models: {allowed_models}"
+        )
+
+    # Rate limit check
+    await rate_limiter.check(product_id=product, user_id=context.user_id)
+
+    # Read and validate file
+    file_content = await file.read()
+
+    if len(file_content) > MAX_AUDIO_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File size exceeds limit ({MAX_AUDIO_FILE_SIZE // (1024 * 1024)}MB)"
+        )
+
+    if len(file_content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty file"
+        )
+
+    logger.info(
+        "proxying audio transcription request",
+        extra={
+            "product": product,
+            "user": context.user_id,
+            "method": context.method,
+            "model": model,
+            "file_size": len(file_content),
+            "filename": file.filename,
+        },
+    )
+
+    # Build payload for upstream
+    payload = {
+        "file_content": file_content,
+        "filename": file.filename or "audio.webm",
+        "model": model,
+        "language": language,
+        "prompt": prompt,
+        "response_format": response_format or "json",
+        "temperature": temperature or 0,
+    }
+
+    response = await call_ai_service(
+        product_id=product,
+        payload=payload,
+        settings=settings,
+        endpoint_type="transcription"
+    )
+    return response
 
 
 def create_app() -> FastAPI:

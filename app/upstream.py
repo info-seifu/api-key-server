@@ -82,6 +82,20 @@ async def call_ai_service(product_id: str, payload: dict, settings: Settings, en
                 base_url=provider_config.base_url,
                 timeout=settings.request_timeout_seconds
             )
+        elif endpoint_type == "transcription":
+            # Transcription requires special handling (file upload)
+            return await provider_class.call_transcribe(
+                api_key=provider_config.api_key,
+                file_content=payload["file_content"],
+                filename=payload["filename"],
+                model=payload.get("model", "whisper-1"),
+                language=payload.get("language"),
+                prompt=payload.get("prompt"),
+                response_format=payload.get("response_format", "json"),
+                temperature=payload.get("temperature", 0),
+                base_url=provider_config.base_url,
+                timeout=settings.request_timeout_seconds
+            )
         else:  # chat
             return await provider_class.call(
                 api_key=provider_config.api_key,

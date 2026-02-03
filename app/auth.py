@@ -232,3 +232,69 @@ async def ensure_authenticated(
         )
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+
+async def verify_hmac_multipart(
+    *,
+    client_id: str,
+    timestamp: str,
+    signature: str,
+    product_id: str,
+    method: str,
+    path: str,
+    form_fields: dict,
+    settings: Settings,
+) -> AuthContext:
+    """
+    HMAC authentication for multipart/form-data requests.
+
+    For multipart requests, the body_hash is calculated from form fields (excluding file).
+    Client should calculate: SHA256(JSON.stringify({model, language, ...}))
+
+    Args:
+        client_id: Client identifier
+        timestamp: Unix timestamp string
+        signature: HMAC signature
+        product_id: Product identifier from URL path
+        method: HTTP method
+        path: URL path
+        form_fields: Form fields excluding file (model, language, etc.)
+        settings: Application settings
+    """
+    import json
+
+    if client_id not in settings.client_hmac_secrets:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown client")
+
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid timestamp")
+
+    now = int(time.time())
+    if abs(now - ts) > settings.hmac_clock_tolerance_seconds:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Timestamp outside tolerance")
+
+    secret = settings.client_hmac_secrets[client_id]
+
+    # For multipart, body_hash is calculated from form fields (excluding file)
+    # Sort keys for consistent hash calculation
+    sorted_fields = dict(sorted(form_fields.items()))
+    body_bytes = json.dumps(sorted_fields, separators=(",", ":")).encode("utf-8")
+    computed = _calculate_hmac_signature(secret, timestamp, method, path, body_bytes)
+
+    if not hmac.compare_digest(computed, signature):
+        logger.warning(
+            "HMAC signature mismatch (multipart)",
+            extra={
+                "client_id": client_id,
+                "timestamp": timestamp,
+                "method": method,
+                "path": path,
+            }
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Signature mismatch")
+
+    logger.info(f"HMAC authentication successful for client: {client_id} (multipart)")
+
+    return AuthContext(user_id=client_id, product_id=product_id, method="hmac", client_id=client_id)
