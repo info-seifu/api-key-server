@@ -109,6 +109,21 @@ async def chat_completions(
     )
 
     response = await call_openai(product_id=product, payload=request_body, settings=settings)
+
+    # 使用量ログを記録
+    usage = response.get("usage", {}) if isinstance(response, dict) else {}
+    logger.info(
+        "request completed",
+        extra={
+            "product": product,
+            "user": context.user_id,
+            "model": payload.model,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    )
+
     return response
 
 
@@ -430,6 +445,22 @@ async def audio_transcriptions(
         settings=settings,
         endpoint_type="transcription"
     )
+
+    # 使用量ログを記録（Whisper APIはトークン情報を返さないが、将来の拡張に備えて）
+    usage = response.get("usage", {}) if isinstance(response, dict) else {}
+    logger.info(
+        "transcription completed",
+        extra={
+            "product": product,
+            "user": context.user_id,
+            "model": model,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "file_size": len(file_content),
+        },
+    )
+
     return response
 
 
