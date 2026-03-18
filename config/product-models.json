@@ -41,5 +41,12 @@
         "models": ["whisper-1"]
       }
     }
+  },
+  "kouhou-crm": {
+    "providers": {
+      "gemini": {
+        "models": ["gemini-2.0-flash"]
+      }
+    }
   }
 }
