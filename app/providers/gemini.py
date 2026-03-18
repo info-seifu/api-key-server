@@ -74,6 +74,39 @@ class GeminiProvider:
         return GeminiProvider._convert_response(gemini_response, model)
 
     @staticmethod
+    def _convert_content_to_parts(content) -> list[dict]:
+        """Convert OpenAI content (string or multimodal array) to Gemini parts."""
+        # テキストのみの場合
+        if isinstance(content, str):
+            return [{"text": content}]
+
+        # マルチモーダル配列の場合
+        # OpenAI形式: [{"type":"text","text":"..."}, {"type":"image_url","image_url":{"url":"data:mime;base64,..."}}]
+        # Gemini形式: [{"text":"..."}, {"inline_data":{"mime_type":"...","data":"..."}}]
+        parts = []
+        for item in content:
+            if item.get("type") == "text":
+                parts.append({"text": item["text"]})
+            elif item.get("type") == "image_url":
+                url = item.get("image_url", {}).get("url", "")
+                if url.startswith("data:"):
+                    # data:image/jpeg;base64,/9j/... → mime_type + data
+                    header, data = url.split(",", 1)
+                    mime_type = header.split(":")[1].split(";")[0]
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": data,
+                        }
+                    })
+                else:
+                    logger.warning(f"Unsupported image_url format (non-data URI): {url[:50]}")
+            else:
+                logger.warning(f"Unknown content type: {item.get('type')}")
+
+        return parts if parts else [{"text": ""}]
+
+    @staticmethod
     def _convert_request(openai_payload: dict) -> dict:
         """Convert OpenAI request format to Gemini format."""
         messages = openai_payload.get("messages", [])
@@ -82,9 +115,10 @@ class GeminiProvider:
         contents = []
         for msg in messages:
             role = "user" if msg["role"] in ["user", "system"] else "model"
+            parts = GeminiProvider._convert_content_to_parts(msg["content"])
             contents.append({
                 "role": role,
-                "parts": [{"text": msg["content"]}]
+                "parts": parts,
             })
 
         gemini_payload = {"contents": contents}
